@@ -53,3 +53,7 @@ _sql_section.txt
 
 # Misc
 -
+
+# Supabase CLI .temp directories
+frontend/supabase/.temp/
+supabase/supabase/.temp/
