@@ -1,158 +1,176 @@
-# 考研AI助手 · 快速部署指南
+# 考研AI助手 · ky-platform
 
-## 前置条件
+基于大模型的智能考研学习平台，将考研资料转化为可语义检索的向量知识库，通过 Codex Agent 实现一对一 AI 辅导。
 
-1. [Supabase](https://supabase.com) 账号 + 项目
-2. [OpenAI API Key](https://platform.openai.com/api-keys) (用于 embedding)
-3. [夸克网盘](https://pan.quark.cn) WebDAV 地址 (设置 → WebDAV)
+## 核心架构：4 层 AI 学习系统
+
+### 1. 文档接入与智能切片
+
+```
+PDF/课件 → MinerU 解析 → Markdown → Chunker 切片 → 知识点块
+```
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| MinerU 解析器 | `backend/src/services/mineru_parser.py` | 将 PDF 课件/试卷解析为结构化 Markdown，识别数学公式、表格 |
+| Chunker 切片器 | `backend/src/services/chunker.py` | 按 Markdown 标题层级（##/###/####）切分为"知识点块"和"题目块"，支持识别目录、过滤无关内容 |
+
+内置**知识点标签映射**：自动将关键词（如"导数""积分""二叉树"）归类到标准知识体系。
 
 ---
 
-## 一、数据库部署 (5分钟)
+### 2. 向量化与语义匹配 (Embedding + pgvector)
 
-### 方式A: Supabase Dashboard (推荐)
+```
+文本内容 → OpenAI text-embedding-3-small → 1536维向量 → Supabase pgvector
+```
 
-1. 打开 [Supabase Dashboard](https://supabase.com/dashboard) → 你的项目
-2. 左侧菜单 → **SQL Editor**
-3. 点击 **New query**
-4. 复制 `supabase/migrations/001_init.sql` 全部内容
-5. 粘贴并点击 **Run** (Ctrl+Enter)
-6. 确认所有表创建成功
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| Embedding 服务 | `backend/src/services/embedding.py` | 调用 OpenAI Embedding API，将知识点/资料文本转为 1536 维向量 |
+| 向量存储 | Supabase `pgvector` 扩展 | IVFFlat 索引 + cosine 距离，高效语义检索 |
 
-### 方式B: Supabase CLI (可选)
+**三大核心查询：**
+
+| 查询 | 用途 |
+|------|------|
+| 相似知识点推荐 | 找到语义最接近的其他知识点 |
+| 资料自动关联 | 将未打标签的学习资料自动匹配到知识点 |
+| 学习模式聚类 | 分析每日学习行为向量，找到相似的历史学习日 |
+
+---
+
+### 3. AI 对话辅导 (Codex Agent)
+
+```
+浏览器 WS → FastAPI relay → JSON-RPC over stdio → Codex app-server → 大模型
+```
+
+这是整个平台最核心的 AI 交互机制：
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| Codex 服务 | `backend/src/services/codex_service.py` | Session 管理，每个用户一个 LearningSession，spawn 独立 Codex app-server 子进程 |
+| 学习服务 | `backend/src/services/learning_service.py` | 对话流程编排，知识库 RAG 增强 |
+| 中继服务 | `backend/src/services/relay_service.py` | WebSocket ↔ JSON-RPC 2.0 over stdin/stdout 双向中继 |
+
+**通信协议：JSON-RPC 2.0 over stdin/stdout**（非 HTTP，无网络开销）
+
+**消息流：**
+
+```
+用户发消息 → WebSocket → relay → CodexService.send_user_message()
+→ turn/start RPC → 大模型推理 → turn/item/updated 流式返回
+→ WebSocket → 前端渲染
+```
+
+- 首次消息自动注入中文系统提示：`"You must respond in Chinese ONLY. You are a Chinese graduate entrance exam math tutor."`
+- 支持**远程代理模式**：浏览器生成配对码，本地 PC 运行 `local_agent.py` 连接，AI 操作本地文件系统
+
+---
+
+### 4. 知识体系与学习追踪
+
+| 实体 | Embedding 内容 | 用途 |
+|------|----------------|------|
+| `knowledge_points` | name + description | 树形知识图谱，掌握度追踪 |
+| `learning_materials` | title + type + notes | 资料 → 知识点自动匹配 |
+| `study_patterns` | 时段/科目/完成率/心情 JSON | 学习习惯分析，AI 优化建议 |
+
+---
+
+## 整体数据流
+
+```
+夸克网盘(WebDAV) → 文件下载 → MinerU解析 → Chunker切片 → Embedding向量化
+                                                              ↓
+浏览器 ← WebSocket ← FastAPI ← Codex子进程 ← 大模型API    pgvector语义检索
+                                              ↓
+                                         知识库RAG增强
+```
+
+**核心思想：** 将考研资料转化为可语义检索的向量知识库，再通过 Codex Agent 让大模型基于这些资料进行一对一辅导。整个链路从文档解析、知识切片、向量化存储到实时对话，形成完整的 AI 学习闭环。
+
+---
+
+## 技术栈
+
+| 层 | 技术 |
+|----|------|
+| 前端 | React 18 + Vite + TypeScript + Tailwind CSS + Recharts |
+| 后端 | Python FastAPI + WebSocket + JSON-RPC 2.0 |
+| AI 引擎 | Codex CLI (OpenAI) + OpenAI Embedding API |
+| 数据库 | Supabase (PostgreSQL + pgvector) |
+| 文档解析 | MinerU + 自研 Chunker |
+| 文件存储 | 夸克网盘 WebDAV |
+
+---
+
+## 快速开始
+
+### 前置条件
+
+1. [Supabase](https://supabase.com) 账号 + 项目
+2. [OpenAI API Key](https://platform.openai.com/api-keys)
+3. [夸克网盘](https://pan.quark.cn) WebDAV 地址
+
+### 数据库部署
 
 ```bash
-npm install -g supabase
-supabase login
+# 方式A: Supabase Dashboard SQL Editor 执行 supabase/migrations/ 下所有迁移文件
+# 方式B: Supabase CLI
 supabase link --project-ref <your-project-ref>
 supabase db push
 ```
 
-### 方式C: psql 直连
+### Edge Function 部署
 
 ```bash
-psql "postgresql://postgres:<password>@<host>:5432/postgres" -f supabase/migrations/001_init.sql
-```
-
----
-
-## 二、Edge Function 部署 (向量化核心)
-
-### 2.1 部署 generate-embedding
-
-```bash
-# 进入项目目录
 cd supabase
-
-# 部署函数
 supabase functions deploy generate-embedding
-
-# 设置 OpenAI Key
 supabase secrets set OPENAI_API_KEY=sk-your-key-here
 ```
 
-### 2.2 验证
+### 后端启动
 
 ```bash
-curl -X POST "https://<project-ref>.supabase.co/functions/v1/generate-embedding" \
-  -H "Authorization: Bearer <anon-key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "table": "knowledge_points",
-    "record": {
-      "id": "test-123",
-      "name": "函数极限",
-      "description": "函数在某一点处的极限定义"
-    }
-  }'
+cd backend
+pip install -r requirements.txt
+uvicorn src.main:app --reload
+```
+
+### 前端启动
+
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
 ---
 
-## 三、向量化使用流程
-
-```
-┌──────────────┐     ┌─────────────────┐     ┌──────────┐
-│  前端/App     │     │  Edge Function   │     │ OpenAI   │
-│              │     │                  │     │          │
-│ 创建知识点 ──►│     │                  │     │          │
-│              │───►│ POST /generate   │     │          │
-│              │     │  -embedding      │───►│ Embedding│
-│              │     │                  │◄───│ API      │
-│              │     │ 写入 kp.embedding│     │          │
-│              │◄───│                  │     │          │
-│              │     │                  │     │          │
-│ 关联资料 ───►│     │                  │     │          │
-│              │───►│ POST /generate   │     │          │
-│              │     │  -embedding      │───►│ Embedding│
-│              │     │                  │◄───│ API      │
-│              │     │ 写入 lm.embedding│     │          │
-│              │     │                  │     │          │
-│              │     │ 自动匹配 ────────►     │          │
-│              │     │ lm.embedding <=>       │          │
-│              │     │ kp.embedding           │          │
-│              │◄───│ 返回 Top-5 匹配        │          │
-└──────────────┘     └─────────────────┘     └──────────┘
-```
-
-### 向量相似度检索 (SQL直接查询)
-
-```sql
--- 1. 上传资料后, 自动匹配最相关的知识点
-SELECT * FROM match_materials_to_knowledge_points(
-  '<user_id>',
-  '<material_id>',
-  5  -- 返回Top-5
-);
-
--- 2. 根据知识点找相似知识点 (薄弱环节诊断)
-SELECT * FROM search_similar_knowledge_points(
-  '<user_id>',
-  '<知识点的embedding向量>',
-  5,
-  0.75
-);
-
--- 3. 分析学习模式相似的历史日期
-SELECT * FROM search_similar_study_patterns(
-  '<user_id>',
-  '<今日学习模式向量>',
-  5
-);
-```
-
----
-
-## 四、表结构速查
-
-| 表 | 用途 | 向量字段 |
-|---|---|---|
-| `exam_info` | 考试信息(倒计时) | - |
-| `subjects` | 科目(政治/英语/数学...) | - |
-| `plans` | 长计划 | - |
-| `plan_phases` | 计划阶段 | - |
-| `knowledge_points` | 知识点(树形) | `embedding VECTOR(1536)` |
-| `webdav_configs` | 夸克WebDAV配置 | - |
-| `learning_materials` | 学习资料 | `embedding VECTOR(1536)` |
-| `daily_goals` | 每日目标 | - |
-| `daily_goal_items` | 目标项 | - |
-| `study_sessions` | 学习计时 | - |
-| `study_patterns` | 学习行为模式 | `embedding VECTOR(1536)` |
-
----
-
-## 五、文件结构
+## 项目结构
 
 ```
 ky-platform/
+├── frontend/                    # React + Vite 前端
+│   ├── src/
+│   │   ├── components/          # AuthGuard, ChatPanel, MainLayout
+│   │   ├── contexts/            # AuthContext
+│   │   ├── lib/                 # supabase.ts, utils.ts
+│   │   └── pages/               # Dashboard, Knowledge, LearningCenter, Materials, Plans, Statistics, Settings, Login
+│   └── ...
+├── backend/                     # Python FastAPI 后端
+│   ├── src/
+│   │   ├── routes/              # health, learning, learning_context, process
+│   │   └── services/            # chunker, codex_service, embedding, learning_service, mineru_parser, pdf_parser, relay_service, supabase
+│   ├── Dockerfile
+│   └── docker-compose.yml
+├── supabase/                    # Supabase 配置
+│   ├── migrations/              # 数据库迁移 (15+)
+│   └── functions/               # Edge Functions (ai-chat, generate-embedding, parse-document, webdav-proxy)
 ├── docs/
 │   └── ARCHITECTURE.md          # 产品架构文档
-├── supabase/
-│   ├── migrations/
-│   │   ├── 001_init.sql         # 核心数据库迁移 (10表+RLS+函数)
-│   │   └── 002_auto_embedding.sql # 自动向量化触发器
-│   └── functions/
-│       └── generate-embedding/
-│           └── index.ts         # Edge Function: 向量生成
-└── README.md                    # 本文件
+├── local_agent.py               # 远程代理：本地文件系统操作
+└── README.md
 ```
