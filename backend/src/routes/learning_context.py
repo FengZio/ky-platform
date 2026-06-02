@@ -1,5 +1,4 @@
 import logging
-import math
 from pydantic import BaseModel
 from src.services.embedding import get_embedding
 from src.services.supabase import get_admin
@@ -12,37 +11,13 @@ class ContextRequest(BaseModel):
     kp_ids: list[str] = []
     material_ids: list[str] = []
     top_k: int = 5
-
-
-def cosine_similarity(a, b):
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
-def _parse_embedding(emb):
-    """Parse embedding from string or list format."""
-    if emb is None:
-        return None
-    if isinstance(emb, list):
-        return [float(x) for x in emb]
-    if isinstance(emb, str):
-        import re
-        try:
-            return [float(x) for x in re.findall(r'-?[\d.]+(?:e[+-]?\d+)?', emb)]
-        except Exception:
-            return None
-    return None
+    min_score: float = 0.3
 
 
 async def search_vector_context(req: ContextRequest) -> str:
-    print("[CTX] search: msg_len=%d mat_ids=%d kp_ids=%d",
-                len(req.message), len(req.material_ids), len(req.kp_ids))
+    """Search material_chunks and knowledge_points via pgvector."""
+    print("[CTX] search: msg_len=%d mat_ids=%d kp_ids=%d top_k=%d",
+                len(req.message), len(req.material_ids), len(req.kp_ids), req.top_k)
 
     if not req.message.strip():
         return ""
@@ -57,93 +32,65 @@ async def search_vector_context(req: ContextRequest) -> str:
     client = get_admin()
     results = []
 
-    # Material chunks (global or filtered)
     try:
-        q = (
-            client.table("material_chunks")
-            .select("id, content, embedding, material_id")
-            .not_.is_("embedding", "null")
-        )
-        if req.material_ids:
-            q = q.in_("material_id", req.material_ids)
-        resp = q.limit(200).execute()
-        rows = resp.data or []
-        print("[CTX] chunks: %d rows", len(rows))
-
-        dim_mismatch = 0
-        sample_checked = 0
-        sample_scores = []
-        for row in rows:
-            emb = _parse_embedding(row.get("embedding"))
-            if emb is None or len(emb) == 0:
-                continue
-            if dim_mismatch == 0 and sample_checked == 0:
-                print("[CTX] first chunk emb parsed: len=%d sample=%s", len(emb), str(emb[:3]))
-                sample_checked += 1
-            if len(query_emb) != len(emb):
-                dim_mismatch += 1
-                if dim_mismatch <= 3:
-                    print("[CTX] DIM: query=%d stored=%d", len(query_emb), len(emb))
-                continue
-            score = cosine_similarity(query_emb, emb)
-            if score >= 0.4:
-                results.append(dict(source_type="chunk", title="", content=row.get("content", ""),
-                                    score=score, material_id=row.get("material_id", "")))
-
-        if dim_mismatch:
-            print("[CTX] dim mismatches: %d/%d", dim_mismatch, len(rows))
-        if sample_scores:
-            print("[CTX] sample scores (first 5): %s", [round(s, 4) for s in sample_scores[:5]])
-
-        # Fetch titles
-        mids = set(r["material_id"] for r in results)
-        if mids:
-            tr = client.table("learning_materials").select("id,title").in_("id", list(mids)).execute()
-            tm = {r["id"]: r.get("title", "") for r in (tr.data or [])}
-            for r in results:
-                r["title"] = tm.get(r["material_id"], "")
-
-        print("[CTX] chunk matches: %d", len(results))
+        chunk_resp = client.rpc(
+            "search_chunks_by_vector",
+            {
+                "p_query_embedding": query_emb,
+                "p_user_id": None,
+                "p_material_ids": req.material_ids or None,
+                "p_top_k": req.top_k * 2,
+                "p_min_score": req.min_score,
+            },
+        ).execute()
+        chunk_rows = chunk_resp.data or []
+        print("[CTX] chunk RPC results: %d rows", len(chunk_rows))
+        for row in chunk_rows:
+            results.append(dict(
+                source_type="chunk",
+                title=row.get("material_title", ""),
+                content=row.get("chunk_content", "")[:800],
+                score=float(row.get("match_score", 0)),
+                material_id=row.get("material_id", ""),
+            ))
     except Exception as e:
-        print("[CTX] chunk error: %s", e, exc_info=True)
+        print("[CTX] chunk RPC error: %s", e)
 
-    # Knowledge points (global or filtered)
     try:
-        q = (
-            client.table("knowledge_points")
-            .select("id, name, description, embedding")
-            .not_.is_("embedding", "null")
-        )
-        if req.kp_ids:
-            q = q.in_("id", req.kp_ids)
-        resp = q.limit(100).execute()
-        rows = resp.data or []
-        print("[CTX] kp: %d rows", len(rows))
-
-        for row in rows:
-            emb = _parse_embedding(row.get("embedding"))
-            if emb is None or len(emb) == 0:
-                continue
-            if len(query_emb) != len(emb):
-                continue
-            score = cosine_similarity(query_emb, emb)
-            if score >= 0.4:
-                results.append(dict(source_type="knowledge_point", title=row.get("name", ""),
-                                    content=row.get("description") or row.get("name", ""), score=score))
+        kp_resp = client.rpc(
+            "search_kps_by_vector",
+            {
+                "p_query_embedding": query_emb,
+                "p_user_id": None,
+                "p_kp_ids": req.kp_ids or None,
+                "p_top_k": req.top_k,
+                "p_min_score": req.min_score,
+            },
+        ).execute()
+        kp_rows = kp_resp.data or []
+        print("[CTX] kp RPC results: %d rows", len(kp_rows))
+        for row in kp_rows:
+            results.append(dict(
+                source_type="knowledge_point",
+                title=row.get("kp_name", ""),
+                content=row.get("description") or row.get("kp_name", ""),
+                score=float(row.get("match_score", 0)),
+            ))
     except Exception as e:
-        print("[CTX] kp error: %s", e, exc_info=True)
+        print("[CTX] kp RPC error: %s", e)
 
     results.sort(key=lambda r: r["score"], reverse=True)
     top = results[:req.top_k]
 
     if not top:
-        print("[CTX] no results (threshold=0.4)")
+        print("[CTX] no results (min_score=%.2f)", req.min_score)
         return ""
 
     parts = []
     for r in top:
-        label = "资料片段" if r["source_type"] == "chunk" else "知识点"
-        parts.append("[%s] %s (相关度: %.0f%%)\n%s" % (label, r["title"], r["score"] * 100, r["content"][:800]))
+        label = "\u8d44\u6599\u7247\u6bb5" if r["source_type"] == "chunk" else "\u77e5\u8bc6\u70b9"
+        line = "[%s] %s (\u76f8\u5173\u5ea6: %.0f%%)\n%s" % (label, r["title"], r["score"] * 100, r["content"])
+        parts.append(line)
 
     context = "\n\n---\n".join(parts)
     print("[CTX] final: %d results, %d chars", len(top), len(context))

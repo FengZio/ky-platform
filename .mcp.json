@@ -6,6 +6,20 @@
       "headers": {
         "Authorization": "Bearer ${SUPABASE_MCP_TOKEN}"
       }
+    },
+    "ky-platform-search": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["src/mcp_server.py"],
+      "cwd": "${CODEX_WORKSPACE}/backend",
+      "env": {
+        "SUPABASE_URL": "${SUPABASE_URL}",
+        "SUPABASE_SERVICE_ROLE_KEY": "${SUPABASE_SERVICE_ROLE_KEY}",
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "OPENAI_BASE_URL": "${OPENAI_BASE_URL}",
+        "EMBEDDING_MODEL": "${EMBEDDING_MODEL}"
+      },
+      "description": "ky-platform 知识库语义搜索 — 通过 pgvector 检索知识点和学习资料"
     }
   }
 }
