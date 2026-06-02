@@ -15,7 +15,7 @@ class ContextRequest(BaseModel):
 
 
 async def search_vector_context(req: ContextRequest) -> str:
-    """Search material_chunks and knowledge_points via pgvector."""
+    """Search material_chunks and knowledge_points via pgvector RPC."""
     print("[CTX] search: msg_len=%d mat_ids=%d kp_ids=%d top_k=%d",
                 len(req.message), len(req.material_ids), len(req.kp_ids), req.top_k)
 
@@ -37,7 +37,6 @@ async def search_vector_context(req: ContextRequest) -> str:
             "search_chunks_by_vector",
             {
                 "p_query_embedding": query_emb,
-                "p_user_id": None,
                 "p_material_ids": req.material_ids or None,
                 "p_top_k": req.top_k * 2,
                 "p_min_score": req.min_score,
@@ -61,7 +60,6 @@ async def search_vector_context(req: ContextRequest) -> str:
             "search_kps_by_vector",
             {
                 "p_query_embedding": query_emb,
-                "p_user_id": None,
                 "p_kp_ids": req.kp_ids or None,
                 "p_top_k": req.top_k,
                 "p_min_score": req.min_score,

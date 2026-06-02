@@ -1,13 +1,15 @@
 -- ============================================================
--- 016: 聊天向量搜索 RPC — 供后端 & MCP Server 调用
---       用 pgvector <=> 算子实现高效语义检索
---       user_id=NULL 时不限用户（admin 模式）
+-- 016: 聊天向量搜索 RPC — 用 pgvector <=> 算子高效检索
 -- ============================================================
+
+-- 清理旧签名 (有 user_id 的版本)
+DROP FUNCTION IF EXISTS search_chunks_by_vector(VECTOR, UUID, UUID[], INT, REAL) CASCADE;
+DROP FUNCTION IF EXISTS search_kps_by_vector(VECTOR, UUID, UUID[], INT, REAL) CASCADE;
+DROP FUNCTION IF EXISTS search_chunks_hybrid(VECTOR, UUID, TEXT[], UUID[], INT, REAL) CASCADE;
 
 -- 搜索资料分块 (按用户消息向量)
 CREATE OR REPLACE FUNCTION search_chunks_by_vector(
     p_query_embedding VECTOR,
-    p_user_id         UUID DEFAULT NULL,
     p_material_ids    UUID[] DEFAULT NULL,
     p_top_k           INT DEFAULT 5,
     p_min_score       REAL DEFAULT 0.3
@@ -30,7 +32,6 @@ BEGIN
     FROM material_chunks mc
     JOIN learning_materials lm ON lm.id = mc.material_id
     WHERE mc.embedding IS NOT NULL
-      AND (p_user_id IS NULL OR lm.user_id = p_user_id)
       AND (p_material_ids IS NULL OR lm.id = ANY(p_material_ids))
       AND (1 - (mc.embedding <=> p_query_embedding))::REAL >= p_min_score
     ORDER BY mc.embedding <=> p_query_embedding
@@ -41,7 +42,6 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- 搜索知识点 (按用户消息向量)
 CREATE OR REPLACE FUNCTION search_kps_by_vector(
     p_query_embedding VECTOR,
-    p_user_id         UUID DEFAULT NULL,
     p_kp_ids          UUID[] DEFAULT NULL,
     p_top_k           INT DEFAULT 5,
     p_min_score       REAL DEFAULT 0.3
@@ -61,7 +61,6 @@ BEGIN
         (1 - (kp.embedding <=> p_query_embedding))::REAL AS match_score
     FROM knowledge_points kp
     WHERE kp.embedding IS NOT NULL
-      AND (p_user_id IS NULL OR kp.user_id = p_user_id)
       AND (p_kp_ids IS NULL OR kp.id = ANY(p_kp_ids))
       AND (1 - (kp.embedding <=> p_query_embedding))::REAL >= p_min_score
     ORDER BY kp.embedding <=> p_query_embedding
@@ -72,7 +71,6 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- 搜索资料分块 (按标签 + 向量混合)
 CREATE OR REPLACE FUNCTION search_chunks_hybrid(
     p_query_embedding VECTOR,
-    p_user_id         UUID DEFAULT NULL,
     p_knowledge_tags  TEXT[] DEFAULT NULL,
     p_material_ids    UUID[] DEFAULT NULL,
     p_top_k           INT DEFAULT 5,
@@ -101,7 +99,6 @@ BEGIN
         FROM material_chunks mc
         JOIN learning_materials lm ON lm.id = mc.material_id
         WHERE mc.embedding IS NOT NULL
-          AND (p_user_id IS NULL OR lm.user_id = p_user_id)
           AND (p_material_ids IS NULL OR lm.id = ANY(p_material_ids))
           AND (p_knowledge_tags IS NULL OR mc.knowledge_points && p_knowledge_tags)
           AND (1 - (mc.embedding <=> p_query_embedding))::REAL >= p_min_score
@@ -120,7 +117,6 @@ BEGIN
         FROM material_chunks mc
         JOIN learning_materials lm ON lm.id = mc.material_id
         WHERE mc.embedding IS NOT NULL
-          AND (p_user_id IS NULL OR lm.user_id = p_user_id)
           AND (p_material_ids IS NULL OR lm.id = ANY(p_material_ids))
           AND (1 - (mc.embedding <=> p_query_embedding))::REAL >= p_min_score
           AND NOT EXISTS (
