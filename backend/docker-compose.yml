@@ -1,0 +1,14 @@
+services:
+  ky-backend:
+    build: .
+    container_name: ky-backend
+    restart: unless-stopped
+    ports:
+      - "3456:3456"
+    env_file:
+      - .env
+    # 小内存服务器限制:
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 512M

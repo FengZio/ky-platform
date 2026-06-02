@@ -1,0 +1,19 @@
+[Unit]
+Description=考研AI助手 · 后端节点
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/embedding
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/embedding/.env
+ExecStart=/opt/embedding/.venv/bin/uvicorn src.main:app --host 127.0.0.1 --port 3456
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
