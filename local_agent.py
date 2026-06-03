@@ -9,7 +9,6 @@ WORKSPACE_ROOT = os.getenv("CODEX_AGENT_WORKSPACE", os.path.join(os.environ.get(
 RECONNECT_DELAY = 5
 MAX_RECONNECT_DELAY = 60
 
-# Project root for MCP config
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 MCP_JSON_SRC = os.path.join(PROJECT_ROOT, ".mcp.json")
 MCP_SERVER_SRC = os.path.join(PROJECT_ROOT, "backend", "src", "mcp_server.py")
@@ -35,12 +34,10 @@ class CodexProcess:
         os.makedirs(self.workspace_dir, exist_ok=True)
         logger.info(f"Workspace: {self.workspace_dir}")
 
-        # Copy .mcp.json to workspace so app-server can find MCP config
         if os.path.exists(MCP_JSON_SRC):
             shutil.copy2(MCP_JSON_SRC, os.path.join(self.workspace_dir, ".mcp.json"))
             logger.info("Copied .mcp.json to workspace")
 
-        # Copy mcp_server.py to workspace/backend/src/
         mcp_dst_dir = os.path.join(self.workspace_dir, "backend", "src")
         os.makedirs(mcp_dst_dir, exist_ok=True)
         if os.path.exists(MCP_SERVER_SRC):
@@ -113,28 +110,49 @@ class CodexProcess:
                 line = await self.process.stderr.readline()
                 if not line: break
                 text = line.decode("utf-8", errors="replace").strip()
-                if text: logger.debug(f"[codex stderr] {text}")
+                if text:
+                    logger.info(f"[codex stderr] {text[:300]}")
         except Exception:
             pass
 
     async def _handle_codex_event(self, method: str, params: dict):
-        # Forward all non-response events to the server
+        # Log ALL events verbosely for debugging
+        item = params.get("item", {}) if isinstance(params, dict) else {}
+        item_type = item.get("type", "") if isinstance(item, dict) else ""
+        item_role = item.get("role", "") if isinstance(item, dict) else ""
+        item_status = item.get("status", "") if isinstance(item, dict) else ""
+        logger.info(f"[EVENT] method={method} type={item_type} role={item_role} status={item_status}")
+
+        # Handle tool calls
+        if item_type == "tool_use":
+            tool_name = item.get("name", "")
+            tool_input = item.get("input", {})
+            logger.info(f"[TOOL_CALL] {tool_name}({json.dumps(tool_input, ensure_ascii=False)[:200]})")
+            return
+
         if method == "turn/item/updated" or method == "turn/item/completed":
-            item = params.get("item", {})
-            if item.get("role") == "assistant":
+            if item_type == "error":
+                error_text = ""
                 content = item.get("content", [])
-                item_type = item.get("type", "")
-                if item_type in ("thinking", "reasoning"):
-                    return
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            error_text = part.get("text", "")
+                logger.error(f"[ERROR_ITEM] {error_text[:300]}")
+                return
+
+            if item_role == "assistant":
+                content = item.get("content", [])
                 if isinstance(content, list):
                     parts = []
                     for part in content:
                         if isinstance(part, dict):
                             pt = part.get("type", "")
-                            if pt in ("thinking", "reasoning"):
-                                continue
                             if pt in ("text", "output_text"):
-                                parts.append(part.get("text", ""))
+                                txt = part.get("text", "")
+                                if txt:
+                                    parts.append(txt)
+                                    logger.info(f"[CHUNK] {txt[:120]}")
                         elif isinstance(part, str):
                             parts.append(part)
                     text = "".join(parts)
@@ -142,6 +160,7 @@ class CodexProcess:
                         await self._codex_events.put({"type": "assistant_chunk", "text": text, "item_id": item.get("id", "")})
         elif method == "turn/completed":
             self.turn_active = False
+            logger.info(f"[TURN] completed, reason={params.get('reason', '')}")
             await self._codex_events.put({"type": "turn_completed"})
         elif method == "turn/started":
             await self._codex_events.put({"type": "turn_started", "turn_id": params.get("turnId", "")})
@@ -149,6 +168,7 @@ class CodexProcess:
             self.turn_active = False
             error = params.get("error", "Unknown error")
             if isinstance(error, dict): error = error.get("message", str(error))
+            logger.error(f"[TURN_FAILED] {error}")
             await self._codex_events.put({"type": "error", "text": str(error)})
 
     async def _send_request(self, method: str, params: Optional[dict] = None) -> dict:
@@ -231,7 +251,7 @@ async def run_session(ws_url: str, code: str):
             while True:
                 event = await codex._codex_events.get()
                 t = event.get("type", "")
-                if t == "assistant_chunk": logger.info(f"<- Codex: {event['text'][:60]}...")
+                if t == "assistant_chunk": logger.info(f"<- Codex: {event['text'][:80]}...")
                 else: logger.info(f"<- Codex event: {t}")
                 await ws.send(json.dumps(event, ensure_ascii=False))
         st = asyncio.create_task(server_to_codex())
