@@ -17,7 +17,7 @@ from src.services.supabase import (
     get_parse_task,
     list_parse_tasks,
 )
-from src.services.mineru_parser import submit_parse_task, poll_parse_result
+from src.services.mineru_parser import parse_document
 from src.services.chunker import chunk_text
 from src.services.embedding import get_embedding
 
@@ -42,34 +42,41 @@ class TaskSubmitRequest(BaseModel):
 @router.post("")
 async def submit_task(body: TaskSubmitRequest, background_tasks: BackgroundTasks):
     """提交解析任务，返回 task_id，后台异步处理"""
-    supabase = get_admin()
-    mid = body.material_id
+    try:
+        supabase = get_admin()
+        mid = body.material_id
 
-    # 查资料记录 (获取 user_id 和 webdav_path)
-    res = supabase.table("learning_materials").select("*").eq("id", mid).maybe_single().execute()
-    material = _safe_data(res)
-    if not material:
-        raise HTTPException(404, "Material not found")
+        # 查资料记录 (获取 user_id 和 webdav_path)
+        res = supabase.table("learning_materials").select("*").eq("id", mid).maybe_single().execute()
+        material = _safe_data(res)
+        if not material:
+            raise HTTPException(404, "Material not found")
 
-    # webdav_path 优先请求体，其次数据库
-    wd_path = body.webdav_path or material.get("webdav_path", "")
-    if not wd_path:
-        raise HTTPException(400, "No webdav_path available")
+        # webdav_path 优先请求体，其次数据库
+        wd_path = body.webdav_path or material.get("webdav_path", "")
+        if not wd_path:
+            raise HTTPException(400, "No webdav_path available")
 
-    # 获取上传者 ID (兼容旧数据的 user_id 字段)
-    user_id = material.get("uploaded_by") or material.get("user_id", "")
-    if not user_id:
-        raise HTTPException(400, "Material has no owner info (uploaded_by or user_id)")
+        # 获取上传者 ID (兼容旧数据的 user_id 字段)
+        user_id = material.get("uploaded_by") or material.get("user_id", "")
+        if not user_id:
+            raise HTTPException(400, "Material has no owner info (uploaded_by or user_id)")
 
-    # 创建任务记录
-    task = create_parse_task(mid)
-    task_id = task["id"]
+        # 创建任务记录
+        task = create_parse_task(mid)
+        task_id = task.get("id")
+        if not task_id:
+            raise RuntimeError("create_parse_task 未返回有效的 task id")
 
-    # 后台执行
-    background_tasks.add_task(_run_parse_pipeline, task_id, mid, wd_path, user_id)
+        # 后台执行
+        background_tasks.add_task(_run_parse_pipeline, task_id, mid, wd_path, user_id)
 
-    return {"task_id": task_id, "status": "queued"}
-
+        return {"task_id": task_id, "status": "queued"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, f"任务创建失败: {e}")
 
 # ─── GET /api/tasks/{task_id} — 查询状态 ────────────────────
 
@@ -147,11 +154,10 @@ async def _run_parse_pipeline(task_id: str, material_id: str, webdav_path: str, 
             print(f"[task:{task_id}] Starting parse pipeline for material={material_id}")
 
             update_parse_task(task_id, "uploading", 15)
-            batch_id = await submit_parse_task(user_id, webdav_path, task_id)
+            # Step 2: MinerU 解析 (自动检测页数, 超限自动切分并行处理)
 
-            # Step 2: 轮询 MinerU 解析结果
             update_parse_task(task_id, "parsing", 30)
-            final_text = await poll_parse_result(batch_id)
+            final_text = await parse_document(user_id, webdav_path, task_id)
             final_text = final_text[:200000]  # 截断
 
             # Step 3: 分块
@@ -265,3 +271,7 @@ async def _run_parse_pipeline(task_id: str, material_id: str, webdav_path: str, 
             traceback.print_exc()
             print(f"[task:{task_id}] FAILED: {error_msg}")
             update_parse_task(task_id, "failed", 0, message=error_msg)
+
+
+
+

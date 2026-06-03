@@ -649,18 +649,26 @@ function AiMatcher() {
         body.text = mat.content;
       }
 
+      console.log("[parseDocument] Sending to:", backendUrl + "/api/tasks", "body:", body);
       const res = await fetch(backendUrl + "/api/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      console.log("[parseDocument] Response status:", res.status);
       const json = await res.json();
-      if (json.success) {
+      console.log("[parseDocument] Response body:", json);
+      if (json.task_id) {
+        // 任务式接口: 已提交后台队列，由 TaskParser 轮询进度
+        queryClient.invalidateQueries({ queryKey: ["parse-tasks"] });
+        setProgress("✅ 已加入解析队列 (task: " + (json.task_id as string).slice(0, 8) + ")，请等待完成");
+      } else if (json.success) {
+        // 兼容旧同步接口
         queryClient.invalidateQueries({ queryKey: ["materials"] });
         queryClient.invalidateQueries({ queryKey: ["knowledge-points-embedded"] }); queryClient.invalidateQueries({ queryKey: ["knowledge-points-unembedded"] });
         setProgress("✅ 解析完成: " + (json.text_length ?? "?") + " 字 → " + (json.chunks_total ?? "?") + " 块 → " + (json.chunks_embedded ?? "?") + " 块已向量化");
       } else {
-        setProgress("❌ " + (json.error || "未知错误"));
+        setProgress("❌ " + (json.detail || json.error || "未知错误"));
       }
     } catch (e) { setProgress("❌ 请求失败: " + (e instanceof Error ? e.message : "")); }
     setMatching(false);
@@ -715,7 +723,11 @@ function AiMatcher() {
             body: JSON.stringify({ material_id: item.id }),
           });
           const json = await res.json();
-          if (!json.success) console.error("parse failed:", item.id, json.error);
+          if (json.task_id) {
+            console.log("[batchVectorize] task submitted:", json.task_id);
+          } else {
+            console.error("[batchVectorize] parse failed:", item.id, json.detail || json.error);
+          }
         } else {
           const table = "knowledge_points";
           const { data: full } = await supabase.from(table).select("*").eq("id", item.id).maybeSingle();
@@ -1084,14 +1096,21 @@ function TaskParser() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ material_id: materialId }),
       });
-      const json = await res.json();
+      const text = await res.text();
+      console.log("[TaskParser] POST response status:", res.status, "body:", text);
+      let json: Record<string, unknown> = {};
+      try { json = JSON.parse(text); } catch { /* 非 JSON 响应 */ }
       if (json.task_id) {
         refetchTasks(); // 立即刷新任务列表
+      } else if (json.detail) {
+        alert("提交失败: " + json.detail);
       } else {
-        alert("提交失败: " + (json.detail || "未知错误"));
+        alert("提交异常 (HTTP " + res.status + ")，请查看控制台日志");
+        // 即使响应不正常，也尝试刷新（后端可能已入库）
+        refetchTasks();
       }
     } catch (e) {
-      alert("请求失败: " + (e instanceof Error ? e.message : ""));
+      alert("网络请求失败: " + (e instanceof Error ? e.message : ""));
     }
     setSubmitting(null);
   };
@@ -1180,3 +1199,4 @@ function TaskParser() {
 }
 
 }
+

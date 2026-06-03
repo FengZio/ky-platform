@@ -9,10 +9,6 @@ WORKSPACE_ROOT = os.getenv("CODEX_AGENT_WORKSPACE", os.path.join(os.environ.get(
 RECONNECT_DELAY = 5
 MAX_RECONNECT_DELAY = 60
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-MCP_JSON_SRC = os.path.join(PROJECT_ROOT, ".mcp.json")
-MCP_SERVER_SRC = os.path.join(PROJECT_ROOT, "backend", "src", "mcp_server.py")
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [agent] %(levelname)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("local_agent")
 
@@ -34,15 +30,7 @@ class CodexProcess:
         os.makedirs(self.workspace_dir, exist_ok=True)
         logger.info(f"Workspace: {self.workspace_dir}")
 
-        if os.path.exists(MCP_JSON_SRC):
-            shutil.copy2(MCP_JSON_SRC, os.path.join(self.workspace_dir, ".mcp.json"))
-            logger.info("Copied .mcp.json to workspace")
-
-        mcp_dst_dir = os.path.join(self.workspace_dir, "backend", "src")
-        os.makedirs(mcp_dst_dir, exist_ok=True)
-        if os.path.exists(MCP_SERVER_SRC):
-            shutil.copy2(MCP_SERVER_SRC, os.path.join(mcp_dst_dir, "mcp_server.py"))
-            logger.info("Copied mcp_server.py to workspace/backend/src/")
+        # MCP servers configured globally in ~/.codex/config.toml
 
         cmd = [CODEX_COMMAND, "app-server"]
         logger.info(f"Spawning: {' '.join(cmd)}")
@@ -65,22 +53,12 @@ class CodexProcess:
             return
         self.turn_active = True
         system_prompt = (
-            "[SYSTEM] 你必须始终用中文回复。你是考研全科辅导老师，覆盖以下科目：\n"
-            "- 数学（数学一/二/三）：高等数学、线性代数、概率论与数理统计\n"
-            "- 408计算机学科专业基础综合：数据结构、计算机组成原理、操作系统、计算机网络\n"
-            "- 英语：完形填空、阅读理解、翻译、写作\n"
-            "- 政治：马原、毛中特、史纲、思修法基、时政\n"
-            "你可以讲解知识点、分析题型、制定复习计划、答疑解惑。\n"
-            "你有 MCP 搜索工具可用：\n"
-            "  search_knowledge — 语义搜索知识点\n"
-            "  search_materials — 语义搜索学习资料（支持 knowledge_tags 标签过滤）\n"
-            "  get_chunk_detail — 查看资料分块完整内容\n"
-            "用户消息中的[前端上下文]包含用户勾选的资料和知识点范围，请用 MCP 工具精准搜索。\n"
-            "所有回复必须使用中文。禁止使用英文回复。\n"
-            "输出格式：使用 Markdown 格式化回复，标题(##)、列表(-)、加粗(**文字**)、代码块(`)等。\n\n"
+            "你是考研辅导老师，用中文回复。用 MCP 工具 search_materials/search_knowledge 搜索资料后回答。\n"
+            "用户消息中[前端上下文]含 material_ids/kp_ids 用于精准搜索。\n"
+            "回复简洁，Markdown 格式。\n\n"
         )
         text = system_prompt + text
-        await self._send_request("turn/start", {"threadId": self.thread_id, "input": [{"type": "text", "text": text}], "cwd": self.workspace_dir, "approvalPolicy": "never", "sandboxPolicy": {"type": "dangerFullAccess"}})
+        await self._send_request("turn/start", {"threadId": self.thread_id, "input": [{"type": "text", "text": text}], "cwd": self.workspace_dir, "approvalPolicy": "never", "sandboxPolicy": {"type": "dangerFullAccess"}, "thinkingBudget": 4000})
 
     async def _read_stdout(self):
         try:
@@ -121,44 +99,49 @@ class CodexProcess:
         item_type = item.get("type", "") if isinstance(item, dict) else ""
         item_role = item.get("role", "") if isinstance(item, dict) else ""
         item_status = item.get("status", "") if isinstance(item, dict) else ""
-        logger.info(f"[EVENT] method={method} type={item_type} role={item_role} status={item_status}")
+        # --- Codex v2 event handling ---
 
-        # Handle tool calls
-        if item_type == "tool_use":
-            tool_name = item.get("name", "")
-            tool_input = item.get("input", {})
-            logger.info(f"[TOOL_CALL] {tool_name}({json.dumps(tool_input, ensure_ascii=False)[:200]})")
+        # item/started: track current item type
+        if method == "item/started":
+            if item_type == "agentMessage":
+                self._current_assistant_text = ""
+                self._current_assistant_id = item.get("id", "")
             return
 
-        if method == "turn/item/updated" or method == "turn/item/completed":
-            if item_type == "error":
-                error_text = ""
-                content = item.get("content", [])
-                if isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            error_text = part.get("text", "")
-                logger.error(f"[ERROR_ITEM] {error_text[:300]}")
-                return
+        # codex/event/agent_message_content_delta: wraps text delta
+        if method == "codex/event/agent_message_content_delta":
+            delta_text = self._extract_delta_text(params)
+            if delta_text:
+                self._current_assistant_text += delta_text
+                logger.info(f"[CHUNK] {delta_text[:120]}")
+            return
 
-            if item_role == "assistant":
-                content = item.get("content", [])
-                if isinstance(content, list):
-                    parts = []
-                    for part in content:
-                        if isinstance(part, dict):
-                            pt = part.get("type", "")
-                            if pt in ("text", "output_text"):
-                                txt = part.get("text", "")
-                                if txt:
-                                    parts.append(txt)
-                                    logger.info(f"[CHUNK] {txt[:120]}")
-                        elif isinstance(part, str):
-                            parts.append(part)
-                    text = "".join(parts)
-                    if text:
-                        await self._codex_events.put({"type": "assistant_chunk", "text": text, "item_id": item.get("id", "")})
-        elif method == "turn/completed":
+        # item/agentMessage/delta: text delta (new version uses this)
+        if method == "item/agentMessage/delta":
+            delta_text = self._extract_delta_text(params)
+            if delta_text:
+                self._current_assistant_text += delta_text
+            return
+
+        # item/completed: finalize and emit
+        if method == "item/completed":
+            if item_type == "agentMessage" and self._current_assistant_text:
+                await self._codex_events.put({
+                    "type": "assistant_chunk",
+                    "text": self._current_assistant_text,
+                    "item_id": self._current_assistant_id,
+                })
+                self._current_assistant_text = ""
+            elif item_type == "commandExecution":
+                pass
+            elif item_type == "error":
+                error_text = self._extract_text_from_item(item)
+                if error_text:
+                    logger.error(f"[ERROR_ITEM] {error_text[:300]}")
+            return
+
+        # --- Codex v1 compat (turn-level events still used by v2) ---
+        if method == "turn/completed":
             self.turn_active = False
             logger.info(f"[TURN] completed, reason={params.get('reason', '')}")
             await self._codex_events.put({"type": "turn_completed"})
@@ -170,6 +153,98 @@ class CodexProcess:
             if isinstance(error, dict): error = error.get("message", str(error))
             logger.error(f"[TURN_FAILED] {error}")
             await self._codex_events.put({"type": "error", "text": str(error)})
+        # Tool call logging (v2 format)
+        elif method == "mcpServer/startupStatus/updated":
+            server_name = params.get("serverName", "") or params.get("name", "")
+            status = params.get("status", "")
+            error = params.get("error", "")
+            if error:
+                logger.error(f"[MCP_SERVER] {server_name} status={status} error={error}")
+            else:
+                logger.info(f"[MCP_SERVER] {server_name} status={status}")
+        elif method == "codex/event/mcp_tool_call_begin":
+            tool_name = params.get("toolName", "") or params.get("name", "")
+            if not tool_name:
+                # Try nested msg.invocation.tool for v2 format
+                msg = params.get("msg", {})
+                invocation = msg.get("invocation", {}) if isinstance(msg, dict) else {}
+                tool_name = invocation.get("tool", "")
+                server = invocation.get("server", "")
+                if tool_name:
+                    tool_input = invocation.get("arguments", {})
+                    logger.info(f"[MCP] {server}/{tool_name}({json.dumps(tool_input, ensure_ascii=False)[:200]})")
+
+        else:
+            # Catch-all for unhandled events to discover new method names
+            if not hasattr(self, '_unhandled'):
+                self._unhandled = set()
+            if method not in self._unhandled:
+                self._unhandled.add(method)
+                item_info = f" type={item_type}" if item_type else ""
+                logger.info(f"[UNHANDLED] method={method}{item_info}")
+
+    def _extract_delta_text(self, params: dict) -> str:
+        """Extract text from delta params (Codex v2 format)."""
+        msg = params.get("msg", {})
+        if isinstance(msg, dict):
+            delta = msg.get("delta", "")
+            # delta may be a string directly, e.g. {"msg": {"delta": "some text"}}
+            if isinstance(delta, str) and delta:
+                return delta
+            # or a dict, e.g. {"msg": {"delta": {"text": "..."}}}
+            if isinstance(delta, dict):
+                text = delta.get("text", "")
+                if text:
+                    return text
+                content = delta.get("content", [])
+                if isinstance(content, list):
+                    parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                    if parts:
+                        return "".join(parts)
+        # Fallback: params.delta can be string or dict
+        delta = params.get("delta", "")
+        if isinstance(delta, str) and delta:
+            return delta
+        if isinstance(delta, dict):
+            text = delta.get("text", "")
+            if text:
+                return text
+            content = delta.get("content", [])
+            if isinstance(content, list):
+                parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                if parts:
+                    return "".join(parts)
+        # Try params.text directly
+        text = params.get("text", "")
+        if isinstance(text, str) and text:
+            return text
+        # Try params.content (string or array)
+        content = params.get("content", "")
+        if isinstance(content, str) and content:
+            return content
+        if isinstance(content, list):
+            parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+            if parts:
+                return "".join(parts)
+        return ""
+
+    def _extract_text_from_item(self, item: dict) -> str:
+        """Extract text from an item object."""
+        content = item.get("content", [])
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    pt = part.get("type", "")
+                    if pt in ("text", "output_text"):
+                        parts.append(part.get("text", ""))
+                elif isinstance(part, str):
+                    parts.append(part)
+            return "".join(parts)
+        return ""
+
 
     async def _send_request(self, method: str, params: Optional[dict] = None) -> dict:
         async with self._lock:

@@ -1,9 +1,13 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useState, useEffect, useRef } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { KnowledgePoint, Subject, LearningMaterial } from '@/types';
 import { cn } from '@/lib/utils';
+import { useLearningWs, type ChatMessage, type ContextItem } from '@/contexts/LearningWsContext';
 import ReactMarkdown from 'react-markdown';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import {
   Brain, Send, Bot, User, Loader2, Sparkles,
   BookOpen, Lightbulb, RefreshCw, Search,
@@ -12,38 +16,24 @@ import {
   X, FolderOpen, History, Plus, Trash2,
 } from 'lucide-react';
 
-type ChatMessage = {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  isStreaming?: boolean;
-};
-
-type ContextItem = { id: string; name: string; type: 'kp' | 'material' };
-
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://vq.zrj666.cn';
-
 export default function LearningCenter() {
-  // ---- State ----
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: 'system', content: '欢迎来到 AI 学习中心！\n\n左侧可选择知识点或学习资料作为提问上下文，AI 将给出更精准的回答。' },
-  ]);
-  const [input, setInput] = useState('');
-  const [agentConnected, setAgentConnected] = useState(false);
-  const [turnActive, setTurnActive] = useState(false);
-  const [selectedKpId, setSelectedKpId] = useState<string>('');
+  // ---- Context: persistent WS state across page switches ----
+  const {
+    messages, input, agentConnected, turnActive, pairingCode,
+    conversationId, selectedKps, selectedMaterials,
+    setInput, setConversationId, setMessages,
+    toggleKp, toggleMaterial, removeContext,
+    handleSend, handleQuickAsk, newConversation,
+  } = useLearningWs();
+
   const [searchText, setSearchText] = useState('');
   const [materialSearch, setMaterialSearch] = useState('');
-  const [pairingCode, setPairingCode] = useState<string>('');
   const [codeCopied, setCodeCopied] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<'knowledge' | 'materials'>('knowledge');
   const [expandedSubjects, setExpandedSubjects] = useState<Set<string>>(new Set());
-  const [selectedKps, setSelectedKps] = useState<ContextItem[]>([]);
-  const [selectedMaterials, setSelectedMaterials] = useState<ContextItem[]>([]);
-  const [conversationId, setConversationId] = useState<string>('');
-  const wsRef = useRef<WebSocket | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // ---- Data ----
+  // ---- Data queries (cached by react-query) ----
   const { data: subjects } = useQuery({
     queryKey: ['subjects'],
     queryFn: async () => {
@@ -92,71 +82,11 @@ export default function LearningCenter() {
     return acc;
   }, {} as Record<string, KnowledgePoint[]>);
 
-  const filteredPoints = points?.filter((p) =>
-    !searchText || p.name.includes(searchText) || p.description?.includes(searchText)
-  );
-
   const filteredMaterials = materials?.filter((m) =>
     !materialSearch || m.title.includes(materialSearch)
   );
 
-  // ---- WebSocket ----
-  const connectWs = useCallback(() => {
-    const protocol = BACKEND_URL.startsWith('https') ? 'wss' : 'ws';
-    const host = BACKEND_URL.replace(/^https?:\/\//, '');
-    const url = protocol + '://' + host + '/api/learning/ws';
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
-
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        switch (msg.type) {
-          case 'pairing_code':
-            setPairingCode(msg.code);
-            break;
-          case 'agent_connected':
-            setAgentConnected(true);
-            setMessages((prev) => [...prev, { role: 'system', content: '✅ 本地 Codex Agent 已连接，可以开始对话了！' }]);
-            break;
-          case 'agent_disconnected':
-            setAgentConnected(false);
-            setTurnActive(false);
-            break;
-          case 'assistant_chunk':
-            setTurnActive(true);
-            setMessages((prev) => {
-              const last = prev[prev.length - 1];
-              if (last?.role === 'assistant' && last.isStreaming) {
-                const updated = [...prev];
-                updated[updated.length - 1] = { ...last, content: last.content + msg.text };
-                return updated;
-              }
-              return [...prev, { role: 'assistant', content: msg.text, isStreaming: true }];
-            });
-            break;
-          case 'turn_completed':
-            setTurnActive(false);
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last?.isStreaming) {
-                updated[updated.length - 1] = { ...last, isStreaming: false };
-              }
-              return updated;
-            });
-            break;
-        }
-      } catch {}
-    };
-
-    ws.onclose = () => {
-      setAgentConnected(false);
-      setTimeout(connectWs, 5000);
-    };
-  }, []);
-
-  useEffect(() => { connectWs(); return () => wsRef.current?.close(); }, [connectWs]);
+  // Auto-scroll
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
   // ---- Actions ----
@@ -168,85 +98,6 @@ export default function LearningCenter() {
     });
   };
 
-  const toggleKp = (kp: KnowledgePoint) => {
-    setSelectedKps((prev) => {
-      const exists = prev.find((c) => c.id === kp.id);
-      if (exists) return prev.filter((c) => c.id !== kp.id);
-      return [...prev, { id: kp.id, name: kp.name, type: 'kp' }];
-    });
-  };
-
-  const toggleMaterial = (m: LearningMaterial & { subject_id?: string }) => {
-    setSelectedMaterials((prev) => {
-      const exists = prev.find((c) => c.id === m.id);
-      if (exists) return prev.filter((c) => c.id !== m.id);
-      return [...prev, { id: m.id, name: m.title, type: 'material' }];
-    });
-  };
-
-  const removeContext = (item: ContextItem) => {
-    if (item.type === 'kp') setSelectedKps((prev) => prev.filter((c) => c.id !== item.id));
-    else setSelectedMaterials((prev) => prev.filter((c) => c.id !== item.id));
-  };
-
-  const getContextIds = () => ({
-    kp_ids: selectedKps.map((k) => k.id),
-    material_ids: selectedMaterials.map((m) => m.id),
-  });
-
-  const handleSend = async () => {
-    const text = input.trim();
-    if (!text || !agentConnected || turnActive) return;
-
-    // Display only the user's raw text, context injected server-side
-    setMessages((prev) => [...prev, { role: 'user', content: text }]);
-    setInput('');
-
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'user_message', text: text, ...getContextIds() }));
-    }
-
-    // Save to DB
-    if (conversationId) {
-      await supabase.from('chat_messages').insert({
-        conversation_id: conversationId,
-        role: 'user',
-        content: text,
-        context_kp_ids: selectedKps.map((k) => k.id),
-        context_material_ids: selectedMaterials.map((m) => m.id),
-      });
-    }
-  };
-
-  const handleQuickAsk = (prompt: string) => {
-    if (!agentConnected || turnActive) return;
-    setMessages((prev) => [...prev, { role: 'user', content: prompt }]);
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'user_message', text: prompt, ...getContextIds() }));
-    }
-  };
-
-  
-  const handleGenerateQuestion = () => {
-    const allNames = [...selectedKps.map((k) => k.name), ...selectedMaterials.map((m) => m.name)];
-    const topic = allNames.length > 0 ? allNames.join('、') : '当前知识点';
-    handleQuickAsk('请根据「' + topic + '」出2道考研难度的题目，包含选择题和计算题，并给出详细解析。');
-  };
-
-  const handleAnalogy = () => {
-    const allNames = [...selectedKps.map((k) => k.name), ...selectedMaterials.map((m) => m.name)];
-    const topic = allNames.length > 0 ? allNames.join('、') : '当前知识点';
-    handleQuickAsk('请围绕「' + topic + '」举一反三，给出2道变体题目，考察相同的核心概念但变换题型或角度。');
-  };
-
-  const newConversation = async () => {
-    const { data } = await supabase.from('chat_conversations').insert({ title: '新对话' }).select('id').single();
-    if (data) {
-      setConversationId(data.id);
-      setMessages([{ role: 'system', content: '新对话已创建。左侧可选择知识点或学习资料作为上下文。' }]);
-    }
-  };
-
   const loadConversation = async (convId: string) => {
     setConversationId(convId);
     const { data } = await supabase
@@ -255,7 +106,7 @@ export default function LearningCenter() {
       .eq('conversation_id', convId)
       .order('created_at', { ascending: true });
     if (data) {
-      setMessages(data.map((m) => ({ role: m.role, content: m.content })));
+      setMessages(data.map((m: { role: string; content: string }) => ({ role: m.role as ChatMessage['role'], content: m.content })));
     }
   };
 
@@ -274,9 +125,22 @@ export default function LearningCenter() {
     }
   };
 
+  // Quick ask helpers
+  const handleGenerateQuestion = () => {
+    const allNames = [...selectedKps.map((k) => k.name), ...selectedMaterials.map((m) => m.name)];
+    const topic = allNames.length > 0 ? allNames.join('、') : '当前知识点';
+    handleQuickAsk('请根据「' + topic + '」出2道考研难度的题目，包含选择题和计算题，并给出详细解析。');
+  };
+
+  const handleAnalogy = () => {
+    const allNames = [...selectedKps.map((k) => k.name), ...selectedMaterials.map((m) => m.name)];
+    const topic = allNames.length > 0 ? allNames.join('、') : '当前知识点';
+    handleQuickAsk('请围绕「' + topic + '」举一反三，给出2道变体题目，考察相同的核心概念但变换题型或角度。');
+  };
+
   // ---- Render ----
   return (
-    <div className="flex h-[calc(100vh-4rem)]">
+    <div className="flex h-full">
       {/* Left Sidebar */}
       <div className="w-80 border-r flex flex-col bg-white dark:bg-gray-900">
         {/* Tab bar */}
@@ -341,8 +205,9 @@ export default function LearningCenter() {
                               )}
                             >
                               <span className={cn('w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center',
-                                selected ? 'bg-primary-600 border-primary-600 text-white' : 'border-gray-300')}>
-                                {selected && <Check className="w-2.5 h-2.5" />}
+                                selected ? 'bg-primary-600 border-primary-600' : 'border-gray-300 dark:border-gray-600'
+                              )}>
+                                {selected && <Check className="w-2.5 h-2.5 text-white" />}
                               </span>
                               <span className="truncate">{kp.name}</span>
                             </button>
@@ -355,114 +220,113 @@ export default function LearningCenter() {
               })}
             </div>
           ) : (
-            <div className="p-1 space-y-0.5">
+            <div className="p-1">
               {filteredMaterials?.map((m) => {
                 const selected = selectedMaterials.some((c) => c.id === m.id);
-                const subject = subjects?.find((s) => s.id === m.subject_id);
                 return (
                   <button
                     key={m.id}
                     onClick={() => toggleMaterial(m)}
                     className={cn(
-                      'w-full text-left px-2 py-1.5 text-xs rounded flex items-center gap-2 hover:bg-gray-100 dark:hover:bg-gray-800',
-                      selected && 'bg-primary-50 dark:bg-primary-900/20'
+                      'w-full text-left px-2 py-1.5 text-xs rounded flex items-center gap-1.5 hover:bg-gray-100 dark:hover:bg-gray-800',
+                      selected && 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300'
                     )}
                   >
                     <span className={cn('w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center',
-                      selected ? 'bg-primary-600 border-primary-600 text-white' : 'border-gray-300')}>
-                      {selected && <Check className="w-2.5 h-2.5" />}
+                      selected ? 'bg-primary-600 border-primary-600' : 'border-gray-300 dark:border-gray-600'
+                    )}>
+                      {selected && <Check className="w-2.5 h-2.5 text-white" />}
                     </span>
-                    <span className="text-gray-500">{materialIcon(m.type)}</span>
-                    <span className="truncate flex-1">{m.title}</span>
-                    {subject && (
-                      <span className="text-[10px] text-gray-400 flex-shrink-0">{subject.name}</span>
-                    )}
+                    {materialIcon(m.type)}
+                    <span className="truncate">{m.title}</span>
                   </button>
                 );
               })}
             </div>
           )}
         </div>
+      </div>
 
-        {/* Conversation history */}
-        <div className="border-t p-2">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[10px] text-gray-400 flex items-center gap-1"><History className="w-3 h-3" />历史对话</span>
-            <button onClick={newConversation} className="text-gray-400 hover:text-primary-600"><Plus className="w-3.5 h-3.5" /></button>
+      {/* Right Chat Panel */}
+      <div className="flex-1 flex flex-col">
+        {/* Header */}
+        <div className="px-5 py-3 border-b flex items-center justify-between bg-white dark:bg-gray-900">
+          <div className="flex items-center gap-2">
+            <Brain className="w-5 h-5 text-primary-600" />
+            <span className="font-semibold text-sm">AI 学习中心</span>
+            <span className={cn('flex items-center gap-1 text-xs px-2 py-0.5 rounded-full',
+              agentConnected ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' :
+              'bg-gray-100 dark:bg-gray-800 text-gray-500')}>
+              {agentConnected ? <><Wifi className="w-3 h-3" /> Codex Agent 已连接</> :
+               pairingCode ? <><WifiOff className="w-3 h-3" /> 未连接</> :
+               <><Loader2 className="w-3 h-3 animate-spin" /> 连接中...</>}
+            </span>
           </div>
-          <div className="space-y-0.5 max-h-32 overflow-auto">
-            {conversations?.map((c: any) => (
+          <div className="flex items-center gap-2">
+            {pairingCode && (
+              <div className="flex items-center gap-1.5 text-xs bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 px-2.5 py-1 rounded-lg">
+                <span className="font-mono tracking-wider">{pairingCode}</span>
+                <button onClick={copyCode} className="p-0.5 hover:bg-amber-200 dark:hover:bg-amber-800 rounded">
+                  {codeCopied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                </button>
+              </div>
+            )}
+            <button onClick={newConversation}
+              className="text-xs px-3 py-1.5 rounded-lg bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 hover:bg-primary-100 flex items-center gap-1">
+              <Plus className="w-3 h-3" />新对话</button>
+          </div>
+        </div>
+
+        {/* Conversation History */}
+        {conversations && conversations.length > 0 && (
+          <div className="px-5 py-2 border-b bg-gray-50 dark:bg-gray-900/50 flex items-center gap-2 overflow-x-auto">
+            <History className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+            {conversations.map((conv: { id: string; title: string }) => (
               <button
-                key={c.id}
-                onClick={() => loadConversation(c.id)}
-                className={cn('w-full text-left px-2 py-1 text-xs rounded truncate hover:bg-gray-100 dark:hover:bg-gray-800',
-                  conversationId === c.id && 'bg-gray-100 dark:bg-gray-800')}
+                key={conv.id}
+                onClick={() => loadConversation(conv.id)}
+                className={cn('text-xs px-2.5 py-1 rounded-full whitespace-nowrap flex-shrink-0',
+                  conversationId === conv.id
+                    ? 'bg-primary-100 dark:bg-primary-900/40 text-primary-700 dark:text-primary-300'
+                    : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100')}
               >
-                {c.title || '未命名对话'}
+                {conv.title || '无标题'}
               </button>
             ))}
           </div>
-        </div>
-      </div>
+        )}
 
-      {/* Right Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Agent status + pairing code */}
-        <div className="px-4 py-2 border-b flex items-center justify-between bg-gray-50 dark:bg-gray-800/50">
-          <div className="flex items-center gap-2 text-xs">
-            <span className={cn('w-2 h-2 rounded-full', agentConnected ? 'bg-emerald-500' : 'bg-gray-300')} />
-            <span className={agentConnected ? 'text-emerald-600' : 'text-gray-500'}>
-              {agentConnected ? 'Agent 已连接' : '等待 Agent 连接...'}
-            </span>
-          </div>
-          {!agentConnected && pairingCode && (
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-mono bg-white dark:bg-gray-800 px-2 py-0.5 rounded border">
-                {pairingCode}
-              </span>
-              <button onClick={copyCode} className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border hover:bg-gray-50">
-                {codeCopied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-                {codeCopied ? '已复制' : '复制'}
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Context chips */}
+        {/* Selected Context */}
         {(selectedKps.length > 0 || selectedMaterials.length > 0) && (
-          <div className="px-4 py-2 border-b bg-gray-50 dark:bg-gray-800/30 flex items-center gap-1.5 flex-wrap">
-            <span className="text-[10px] text-gray-400 mr-1">上下文:</span>
+          <div className="px-5 py-2 border-b bg-violet-50 dark:bg-violet-900/10 flex items-center gap-2 flex-wrap">
+            <Lightbulb className="w-3.5 h-3.5 text-violet-500 flex-shrink-0" />
+            <span className="text-xs text-violet-600 dark:text-violet-400">已选上下文:</span>
             {selectedKps.map((kp) => (
-              <span key={kp.id} className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full">
-                <BookOpen className="w-2.5 h-2.5" />{kp.name}
-                <button onClick={() => removeContext(kp)}><X className="w-2.5 h-2.5 hover:text-red-500" /></button>
+              <span key={kp.id} className="inline-flex items-center gap-1 text-xs bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 px-2 py-0.5 rounded-full">
+                <BookOpen className="w-3 h-3" />{kp.name}
+                <button onClick={() => removeContext(kp)}><X className="w-3 h-3" /></button>
               </span>
             ))}
             {selectedMaterials.map((m) => (
-              <span key={m.id} className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 rounded-full">
-                <FileText className="w-2.5 h-2.5" />{m.name}
-                <button onClick={() => removeContext(m)}><X className="w-2.5 h-2.5 hover:text-red-500" /></button>
+              <span key={m.id} className="inline-flex items-center gap-1 text-xs bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 px-2 py-0.5 rounded-full">
+                <FileText className="w-3 h-3" />{m.name}
+                <button onClick={() => removeContext(m)}><X className="w-3 h-3" /></button>
               </span>
             ))}
           </div>
         )}
 
-        {/* Quick actions */}
-        <div className="px-4 py-2 border-b bg-gray-50 dark:bg-gray-800/50 flex items-center gap-2">
+        {/* Quick Actions */}
+        <div className="px-5 py-2 border-b flex gap-2 bg-white dark:bg-gray-900">
           <button onClick={handleGenerateQuestion} disabled={!agentConnected || turnActive}
-            className="flex items-center gap-1 px-3 py-1.5 bg-primary-600 text-white rounded-lg text-xs font-medium hover:bg-primary-700 disabled:opacity-50">
-            <Zap className="w-3.5 h-3.5" />出题测试</button>
+            className="text-xs px-3 py-1.5 rounded-lg border border-violet-200 dark:border-violet-800 text-violet-600 dark:text-violet-400 hover:bg-violet-50 dark:hover:bg-violet-900/20 flex items-center gap-1 disabled:opacity-50">
+            <FileQuestion className="w-3.5 h-3.5" />生成题目</button>
           <button onClick={handleAnalogy} disabled={!agentConnected || turnActive}
-            className="flex items-center gap-1 px-3 py-1.5 border border-violet-400 text-violet-600 dark:text-violet-400 rounded-lg text-xs font-medium hover:bg-violet-50 dark:hover:bg-violet-950 disabled:opacity-50">
-            <Lightbulb className="w-3.5 h-3.5" />举一反三</button>
-          <button
-            onClick={() => {
-              const all = [...selectedKps.map(k => k.name), ...selectedMaterials.map(m => m.name)];
-              handleQuickAsk('请帮我解释「' + (all.join('、') || '当前知识点') + '」的核心概念和常见考法');
-            }}
-            disabled={!agentConnected || turnActive}
-            className="flex items-center gap-1 px-3 py-1.5 border text-gray-600 dark:text-gray-400 rounded-lg text-xs hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50">
-            概念讲解</button>
+            className="text-xs px-3 py-1.5 rounded-lg border border-violet-200 dark:border-violet-800 text-violet-600 dark:text-violet-400 hover:bg-violet-50 dark:hover:bg-violet-900/20 flex items-center gap-1 disabled:opacity-50">
+            <RefreshCw className="w-3.5 h-3.5" />举一反三</button>
+          <button onClick={() => handleQuickAsk('请用通俗易懂的方式讲解当前知识点')} disabled={!agentConnected || turnActive}
+            className="text-xs px-3 py-1.5 rounded-lg border border-violet-200 dark:border-violet-800 text-violet-600 dark:text-violet-400 hover:bg-violet-50 dark:hover:bg-violet-900/20 flex items-center gap-1 disabled:opacity-50">
+            <Zap className="w-3.5 h-3.5" />概念讲解</button>
         </div>
 
         {/* Messages */}
@@ -481,6 +345,8 @@ export default function LearningCenter() {
               )}>
                 {msg.role === 'assistant' ? (
                   <ReactMarkdown
+                    remarkPlugins={[remarkMath]}
+                    rehypePlugins={[rehypeKatex]}
                     components={{
                       h1: ({ children }) => <h1 className="text-lg font-bold mt-2 mb-1">{children}</h1>,
                       h2: ({ children }) => <h2 className="text-base font-bold mt-2 mb-1">{children}</h2>,

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     mineru_model_version: str = "vlm"
     mineru_poll_interval: int = 3
     mineru_poll_max_retries: int = 200
+    mineru_max_pages: int = 200
 
     # Supabase Storage (MinerU 中转用)
     supabase_storage_bucket: str = "temp-uploads"

@@ -1,6 +1,7 @@
 """
 MinerU 文档解析服务
 WebDAV → Supabase Storage(公网URL) → POST /api/v4/extract/task → 轮询 → full.md
+超过 200 页自动切分后合并
 """
 import asyncio
 import io
@@ -11,9 +12,13 @@ from base64 import b64encode
 from pathlib import Path
 
 import httpx
+import fitz  # PyMuPDF
 
 from src.config import settings
 from src.services.supabase import get_admin, get_webdav_config
+
+
+MAX_PDF_PAGES = getattr(settings, "mineru_max_pages", 200)
 
 
 def _sanitize_filename(raw_name: str) -> str:
@@ -27,13 +32,33 @@ def _sanitize_filename(raw_name: str) -> str:
     return clean_stem + (suffix if suffix else ".pdf")
 
 
-async def submit_parse_task(user_id: str, webdav_path: str, task_id: str) -> str:
-    """提交 MinerU 解析，返回 task_id"""
-    token = settings.mineru_api_token
-    if not token:
-        raise ValueError("MINERU_API_TOKEN not configured")
+def _count_pdf_pages(file_bytes: bytes) -> int:
+    """返回 PDF 总页数"""
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    count = doc.page_count
+    doc.close()
+    return count
 
-    # 1. WebDAV 下载
+
+def _split_pdf_bytes(file_bytes: bytes, max_pages: int) -> list[bytes]:
+    """将 PDF 按 max_pages 切分为多个 bytes，每个 ≤ max_pages 页"""
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    total = doc.page_count
+    chunks = []
+    for start in range(0, total, max_pages):
+        end = min(start + max_pages, total)
+        new_doc = fitz.open()
+        new_doc.insert_pdf(doc, from_page=start, to_page=end - 1)
+        buf = new_doc.tobytes()
+        new_doc.close()
+        chunks.append(buf)
+        print(f"[mineru] Split chunk pages {start+1}-{end} of {total}")
+    doc.close()
+    return chunks
+
+
+async def _download_from_webdav(user_id: str, webdav_path: str) -> tuple[bytes, str]:
+    """从 WebDAV 下载文件，返回 (file_bytes, safe_name)"""
     wd = await get_webdav_config(user_id)
     file_name = webdav_path.rstrip("/").split("/")[-1] or "unknown.pdf"
     safe_name = _sanitize_filename(file_name)
@@ -50,13 +75,11 @@ async def submit_parse_task(user_id: str, webdav_path: str, task_id: str) -> str
         resp.raise_for_status()
         file_bytes = resp.content
     print(f"[mineru] Downloaded: {len(file_bytes)/1024/1024:.1f} MB")
+    return file_bytes, safe_name
 
-    # 2. 上传到 Supabase Storage（纯英文路径）
-    supabase = get_admin()
-    bucket = getattr(settings, "supabase_storage_bucket", "temp-uploads")
-    suffix = Path(safe_name).suffix or ".pdf"
-    storage_path = f"mineru/{task_id}{suffix}"
 
+def _upload_to_storage(supabase, bucket: str, file_bytes: bytes, storage_path: str) -> str:
+    """上传到 Supabase Storage，返回公网 URL"""
     print(f"[mineru] Uploading to Storage: {storage_path}")
     supabase.storage.from_(bucket).upload(
         storage_path, file_bytes,
@@ -64,8 +87,12 @@ async def submit_parse_task(user_id: str, webdav_path: str, task_id: str) -> str
     )
     public_url = supabase.storage.from_(bucket).get_public_url(storage_path)
     print(f"[mineru] Public URL: {public_url[:100]}...")
+    return public_url
 
-    # 3. POST /api/v4/extract/task（官方单文件接口）
+
+async def _submit_mineru_task(public_url: str) -> str:
+    """提交 MinerU 解析任务，返回 mineru_task_id"""
+    token = settings.mineru_api_token
     mineru_base = settings.mineru_base_url.rstrip("/")
     auth_headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
 
@@ -84,8 +111,29 @@ async def submit_parse_task(user_id: str, webdav_path: str, task_id: str) -> str
 
     mineru_task_id = result["data"]["task_id"]
     print(f"[mineru] Submitted, task_id={mineru_task_id}")
-    # 注意: 不在这里删 Storage 文件，MinerU 还没下载
     return mineru_task_id
+
+
+# ─── 保留的旧接口 (兼容其他可能的调用方) ────────────────────
+
+async def submit_parse_task(user_id: str, webdav_path: str, task_id: str) -> str:
+    """提交 MinerU 解析 (旧接口)，返回 mineru_task_id
+
+    注意: 此接口不再自动检测页数/切分，建议使用 parse_document()。
+    """
+    token = settings.mineru_api_token
+    if not token:
+        raise ValueError("MINERU_API_TOKEN not configured")
+
+    file_bytes, safe_name = await _download_from_webdav(user_id, webdav_path)
+
+    supabase = get_admin()
+    bucket = getattr(settings, "supabase_storage_bucket", "temp-uploads")
+    suffix = Path(safe_name).suffix or ".pdf"
+    storage_path = f"mineru/{task_id}{suffix}"
+    public_url = _upload_to_storage(supabase, bucket, file_bytes, storage_path)
+
+    return await _submit_mineru_task(public_url)
 
 
 async def poll_parse_result(mineru_task_id: str) -> str:
@@ -135,3 +183,55 @@ async def poll_parse_result(mineru_task_id: str) -> str:
         interval = min(interval * 2, 30)
 
     raise TimeoutError(f"MinerU timeout after {max_retries} polls")
+
+
+# ─── 新接口: 自动检测页数并按需切分 ──────────────────────────
+
+async def parse_document(user_id: str, webdav_path: str, task_id: str) -> str:
+    """完整解析流程: 下载 → 检测页数 → (可选切分) → 并行提交 → 并行轮询 → 合并
+
+    超过 MAX_PDF_PAGES 页自动切分为多个分片，各分片并行提交和轮询，
+    最后将各分片的 full.md 用双换行拼接返回。
+    """
+    token = settings.mineru_api_token
+    if not token:
+        raise ValueError("MINERU_API_TOKEN not configured")
+
+    # 1. 下载
+    file_bytes, safe_name = await _download_from_webdav(user_id, webdav_path)
+
+    # 2. 检测页数 & 按需切分
+    total_pages = _count_pdf_pages(file_bytes)
+    print(f"[mineru] PDF has {total_pages} pages, max={MAX_PDF_PAGES}")
+
+    if total_pages <= MAX_PDF_PAGES:
+        pdf_parts = [file_bytes]
+    else:
+        print(f"[mineru] Splitting into chunks of {MAX_PDF_PAGES} pages...")
+        pdf_parts = _split_pdf_bytes(file_bytes, MAX_PDF_PAGES)
+
+    # 3. 上传各分片到 Storage
+    supabase_obj = get_admin()
+    bucket = getattr(settings, "supabase_storage_bucket", "temp-uploads")
+    suffix = Path(safe_name).suffix or ".pdf"
+    public_urls = []
+    for i, part_bytes in enumerate(pdf_parts):
+        storage_path = f"mineru/{task_id}_p{i}{suffix}"
+        url = _upload_to_storage(supabase_obj, bucket, part_bytes, storage_path)
+        public_urls.append(url)
+
+    # 4. 并行提交 MinerU 任务
+    mineru_task_ids = await asyncio.gather(*[_submit_mineru_task(u) for u in public_urls])
+    print(f"[mineru] Submitted {len(mineru_task_ids)} part(s)")
+
+    # 5. 并行轮询结果
+    results = await asyncio.gather(*[poll_parse_result(mid) for mid in mineru_task_ids])
+
+    # 6. 合并
+    if len(results) == 1:
+        full_text = results[0]
+    else:
+        full_text = "\n\n".join(results)
+        print(f"[mineru] Merged {len(results)} parts, total {len(full_text)} chars")
+
+    return full_text

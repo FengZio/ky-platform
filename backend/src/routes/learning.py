@@ -1,5 +1,4 @@
-"""
-Learning Routes --- AI Learning Center API
+"""Learning Routes --- AI Learning Center API
 
 WebSocket:
   GET /api/learning/ws          Browser side (generates pairing code)
@@ -40,6 +39,10 @@ async def browser_websocket(ws: WebSocket):
                 try:
                     raw = await ws.receive_text()
                     msg = json.loads(raw)
+                    # Intercept client heartbeat pings - respond directly
+                    if msg.get("type") == "ping":
+                        await ws.send_json({"type": "pong"})
+                        continue
                     msg["from"] = "browser"
                     ok = await relay.browser_to_agent(code, msg)
                     if not ok and msg.get("type") == "user_message":

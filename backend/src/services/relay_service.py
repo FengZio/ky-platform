@@ -151,24 +151,26 @@ class RelayManager:
         if message.get("type") == "user_message":
             text = message.get("text", "")
             kp_ids = message.get("kp_ids", []) or []
+            kp_names = message.get("kp_names", []) or []
             mat_ids = message.get("material_ids", []) or []
+            mat_names = message.get("material_names", []) or []
 
-            if text.strip() and (kp_ids or mat_ids):
-                # Pass frontend context as structured hint for Codex's MCP search
-                hints = []
-                if mat_ids:
-                    hints.append("material_ids=" + ",".join(mat_ids[:10]))
-                if kp_ids:
-                    hints.append("kp_ids=" + ",".join(kp_ids[:10]))
-                hint_text = "; ".join(hints)
+            if text.strip() and (kp_names or mat_names or kp_ids or mat_ids):
+                lines = []
+                if kp_names:
+                    lines.append("已选知识点: " + "、".join(kp_names))
+                    lines.append("kp_ids=" + ",".join(kp_ids[:10]))
+                if mat_names:
+                    lines.append("已选学习资料: " + "、".join(mat_names))
+                    lines.append("material_ids=" + ",".join(mat_ids[:10]))
+                context_block = "\n".join(lines)
 
                 message = dict(message)
                 message["text"] = (
-                    "[前端上下文: " + hint_text + "]\n"
-                    + text + "\n"
-                    + "(你可以用 MCP 工具 search_materials 或 search_knowledge 在这些范围内搜索)"
+                    "[前端上下文]\n" + context_block + "\n\n"
+                    + "[用户问题]\n" + text
                 )
-                logger.info("Relay: enriched with frontend context hints")
+                logger.info("Relay: enriched with names + IDs")
 
         await agent.message_queue.put(message)
         return True

@@ -1,4 +1,5 @@
 import { ReactNode, useState } from "react";
+import { LearningWsProvider } from "@/contexts/LearningWsContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { NavLink, useLocation } from "react-router-dom";
 import {
@@ -92,7 +93,9 @@ export function MainLayout({ children }: { children: ReactNode }) {
           </div>
         </header>
 
-        <main className="flex-1 overflow-auto p-6">{children}</main>
+        <main className="flex-1 overflow-auto p-6">
+          <LearningWsProvider>{children}</LearningWsProvider>
+        </main>
       </div>
     </div>
   );

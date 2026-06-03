@@ -65,30 +65,54 @@ class LearningSession:
         method = message.get("method", "")
         params = message.get("params", {})
 
-        if method in ("turn/item/updated", "turn/item/completed"):
-            item = params.get("item", {})
-            _ct = []
-            _rc = item.get("content", [])
-            if isinstance(_rc, list):
-                for _c in _rc:
-                    _ct.append(_c.get("type", "<no_type>") if isinstance(_c, dict) else "<str>")
-            logger.info("[DEBUG_ITEM] method=%s keys=%s type=%s role=%s status=%s content_types=%s",
-                method, list(item.keys()), item.get("type","<none>"),
-                item.get("role","<none>"), item.get("status","<none>"), _ct)
-            item_type = item.get("type", "")
-            if item_type in ("thinking", "reasoning"):
-                logger.info("[DEBUG_FILTER] Item filtered: type=%s", item_type)
-                return
-            if item.get("role") == "assistant":
-                text = self._extract_text_from_item(item)
-                if text:
-                    await self._message_queue.put({
-                        "type": "assistant_chunk",
-                        "text": text,
-                        "item_id": item.get("id", ""),
-                    })
+        # --- Codex v2 event handling (new method names) ---
 
-        elif method == "turn/completed":
+        # item/started: track current item type
+        if method == "item/started":
+            item = params.get("item", {})
+            item_type = item.get("type", "")
+            if item_type == "agentMessage":
+                self._assistant_text_parts = []
+            return
+
+        # item/agentMessage/delta: accumulate text chunks
+        if method == "item/agentMessage/delta":
+            delta = params.get("delta", {})
+            if isinstance(delta, dict):
+                text = delta.get("text", "")
+                if text:
+                    self._assistant_text_parts.append(text)
+            else:
+                text = params.get("text", "")
+                if isinstance(text, str) and text:
+                    self._assistant_text_parts.append(text)
+            return
+
+        # item/completed: finalize and emit
+        if method == "item/completed":
+            item = params.get("item", {})
+            item_type = item.get("type", "")
+            if item_type == "agentMessage" and self._assistant_text_parts:
+                text = "".join(self._assistant_text_parts)
+                await self._message_queue.put({
+                    "type": "assistant_chunk",
+                    "text": text,
+                    "item_id": item.get("id", ""),
+                })
+                self._assistant_text_parts = []
+            elif item_type == "error":
+                error_text = ""
+                content = item.get("content", [])
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            error_text = part.get("text", "")
+                if error_text:
+                    logger.error(f"Codex error item: {error_text[:300]}")
+            return
+
+        # --- Codex v1 compat ---
+        if method == "turn/completed":
             self._turn_active = False
             await self._message_queue.put({"type": "turn_completed"})
 
@@ -107,6 +131,7 @@ class LearningSession:
                 "type": "turn_started",
                 "turn_id": params.get("turnId", ""),
             })
+
 
     def _extract_text_from_item(self, item: dict) -> str:
         content = item.get("content", [])
