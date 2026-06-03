@@ -1,8 +1,3 @@
-"""
-local_agent.py -- Local PC Agent Daemon
-Connects to remote server, spawns codex app-server, relays messages.
-Usage: python local_agent.py  (enter pairing code when prompted)
-"""
 import asyncio, json, os, shutil, sys, uuid, logging
 from typing import Optional
 import websockets
@@ -13,6 +8,11 @@ CODEX_COMMAND = os.getenv("CODEX_AGENT_COMMAND", "codex")
 WORKSPACE_ROOT = os.getenv("CODEX_AGENT_WORKSPACE", os.path.join(os.environ.get("TEMP", "/tmp"), "codex-agent-workspaces"))
 RECONNECT_DELAY = 5
 MAX_RECONNECT_DELAY = 60
+
+# Project root for MCP config
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+MCP_JSON_SRC = os.path.join(PROJECT_ROOT, ".mcp.json")
+MCP_SERVER_SRC = os.path.join(PROJECT_ROOT, "backend", "src", "mcp_server.py")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [agent] %(levelname)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("local_agent")
@@ -34,6 +34,19 @@ class CodexProcess:
     async def start(self):
         os.makedirs(self.workspace_dir, exist_ok=True)
         logger.info(f"Workspace: {self.workspace_dir}")
+
+        # Copy .mcp.json to workspace so app-server can find MCP config
+        if os.path.exists(MCP_JSON_SRC):
+            shutil.copy2(MCP_JSON_SRC, os.path.join(self.workspace_dir, ".mcp.json"))
+            logger.info("Copied .mcp.json to workspace")
+
+        # Copy mcp_server.py to workspace/backend/src/
+        mcp_dst_dir = os.path.join(self.workspace_dir, "backend", "src")
+        os.makedirs(mcp_dst_dir, exist_ok=True)
+        if os.path.exists(MCP_SERVER_SRC):
+            shutil.copy2(MCP_SERVER_SRC, os.path.join(mcp_dst_dir, "mcp_server.py"))
+            logger.info("Copied mcp_server.py to workspace/backend/src/")
+
         cmd = [CODEX_COMMAND, "app-server"]
         logger.info(f"Spawning: {' '.join(cmd)}")
         self.process = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -89,8 +102,10 @@ class CodexProcess:
                         else: future.set_result(msg.get("result", msg))
                     continue
                 await self._handle_codex_event(msg.get("method", ""), msg.get("params", {}))
-        except asyncio.CancelledError: pass
-        except Exception as e: logger.error(f"Stdout error: {e}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Read stdout error: {e}")
 
     async def _read_stderr(self):
         try:
@@ -98,37 +113,33 @@ class CodexProcess:
                 line = await self.process.stderr.readline()
                 if not line: break
                 text = line.decode("utf-8", errors="replace").strip()
-                if text: logger.debug(f"[codex] {text}")
-        except Exception: pass
+                if text: logger.debug(f"[codex stderr] {text}")
+        except Exception:
+            pass
 
     async def _handle_codex_event(self, method: str, params: dict):
-        # Drop reasoning/thinking stream events entirely
-        if method in ("item/reasoning/summaryTextDelta", "item/reasoning/summaryPartAdded",
-                      "codex/event/reasoning_content_delta", "codex/event/agent_reasoning_delta",
-                      "codex/event/agent_reasoning_section_break"):
-            pass
-        # Real answer streaming
-        elif method == "item/agentMessage/delta":
-            delta = params.get("delta", "")
-            if isinstance(delta, str) and delta:
-                await self._codex_events.put({"type": "assistant_chunk", "text": delta})
-        # item/completed as fallback
-        elif method in ("turn/item/updated", "item/completed"):
+        # Forward all non-response events to the server
+        if method == "turn/item/updated" or method == "turn/item/completed":
             item = params.get("item", {})
-            item_type = item.get("type", "")
-            if item_type in ("thinking", "reasoning"):
-                return
             if item.get("role") == "assistant":
-                content_list = item.get("content", [])
-                for part in (content_list if isinstance(content_list, list) else []):
-                    if isinstance(part, dict):
-                        pt = part.get("type", "")
-                        if pt in ("thinking", "reasoning"):
-                            continue
-                        if pt in ("text", "output_text"):
-                            text = part.get("text", "")
-                            if text:
-                                await self._codex_events.put({"type": "assistant_chunk", "text": text})
+                content = item.get("content", [])
+                item_type = item.get("type", "")
+                if item_type in ("thinking", "reasoning"):
+                    return
+                if isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            pt = part.get("type", "")
+                            if pt in ("thinking", "reasoning"):
+                                continue
+                            if pt in ("text", "output_text"):
+                                parts.append(part.get("text", ""))
+                        elif isinstance(part, str):
+                            parts.append(part)
+                    text = "".join(parts)
+                    if text:
+                        await self._codex_events.put({"type": "assistant_chunk", "text": text, "item_id": item.get("id", "")})
         elif method == "turn/completed":
             self.turn_active = False
             await self._codex_events.put({"type": "turn_completed"})
