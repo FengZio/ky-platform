@@ -142,6 +142,32 @@ export default function LearningCenter() {
     handleQuickAsk('请围绕「' + topic + '」举一反三，给出2道变体题目，考察相同的核心概念但变换题型或角度。');
   };
 
+  // ---- LaTeX sanitizer: fix common AI output issues before rendering ----
+  const sanitizeLatex = (text: string): string => {
+    // 1. Remove zero-width and invisible Unicode characters
+    let result = text
+      .replace(/[\u200B-\u200D\uFEFF\u00AD\u2060]/g, '')
+      .replace(/[\u2800-\u28FF]/g, '')  // Braille patterns (often appear as artifacts)
+      .replace(/[\uFFF0-\uFFFF]/g, '')
+      .replace(/[\u202A-\u202E]/g, '');
+
+    // 2. Fix common mismatched delimiters
+    result = result.replace(/(\$\$?)([^$]+?)(\$\$?)/g, (_, open, content, close) => {
+      if (open !== close) {
+        return '$' + content.trim() + '$';
+      }
+      return _;
+    });
+
+    // 3. Ensure $ blocks are on single lines (KaTeX requirement)
+    result = result.replace(/\$\$([\s\S]*?)\$\$/g, (_, content) => {
+      const cleaned = content.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+      return '$' + cleaned + '$';
+    });
+
+    return result;
+  };
+
   // ---- Render ----
   // ---- Question Bank handlers ----
   const handleExtractToBank = async () => {
@@ -429,10 +455,10 @@ export default function LearningCenter() {
                       hr: () => <hr className="my-2 border-gray-300 dark:border-gray-700" />,
                     }}
                   >
-                    {msg.content}
+                    {sanitizeLatex(msg.content)}
                   </ReactMarkdown>
                 ) : (
-                  <span className="whitespace-pre-wrap">{msg.content}</span>
+                  <span className="whitespace-pre-wrap">{sanitizeLatex(msg.content)}</span>
                 )}
                 {msg.isStreaming && <span className="inline-block w-2 h-4 bg-gray-400 animate-pulse ml-1 align-middle" />}
                 {msg.role === "assistant" && !msg.isStreaming && !turnActive && (
