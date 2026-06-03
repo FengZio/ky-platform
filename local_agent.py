@@ -306,33 +306,43 @@ async def main():
 async def run_session(ws_url: str, code: str):
     workspace_id = f"agent-{uuid.uuid4().hex[:8]}"
     codex = CodexProcess(workspace_id)
-    async with websockets.connect(ws_url, ping_interval=30, ping_timeout=10) as ws:
+    async with websockets.connect(ws_url, ping_interval=30, ping_timeout=30) as ws:
         logger.info("Connected to server")
         await codex.start()
         await ws.send(json.dumps({"type": "codex_ready", "thread_id": codex.thread_id}, ensure_ascii=False))
         async def server_to_codex():
-            while True:
-                raw = await ws.recv()
-                msg = json.loads(raw)
-                t = msg.get("type", "")
-                if t == "user_message":
-                    txt = msg.get("text", "")
-                    if txt.strip():
-                        logger.info(f"-> Codex: {txt[:80]}...")
-                        await codex.send_user_message(txt)
-                elif t == "ping": await ws.send(json.dumps({"type": "pong"}))
-                elif t in ("browser_connected", "browser_disconnected"): logger.info(f"Browser: {t}")
+            try:
+                while True:
+                    raw = await ws.recv()
+                    msg = json.loads(raw)
+                    t = msg.get("type", "")
+                    if t == "user_message":
+                        txt = msg.get("text", "")
+                        if txt.strip():
+                            logger.info(f"-> Codex: {txt[:80]}...")
+                            await codex.send_user_message(txt)
+                    elif t == "ping": await ws.send(json.dumps({"type": "pong"}))
+                    elif t in ("browser_connected", "browser_disconnected"): logger.info(f"Browser: {t}")
+            except websockets.ConnectionClosed:
+                pass
         async def codex_to_server():
-            while True:
-                event = await codex._codex_events.get()
-                t = event.get("type", "")
-                if t == "assistant_chunk": logger.info(f"<- Codex: {event['text'][:80]}...")
-                else: logger.info(f"<- Codex event: {t}")
-                await ws.send(json.dumps(event, ensure_ascii=False))
+            try:
+                while True:
+                    event = await codex._codex_events.get()
+                    t = event.get("type", "")
+                    if t == "assistant_chunk": logger.info(f"<- Codex: {event['text'][:80]}...")
+                    else: logger.info(f"<- Codex event: {t}")
+                    await ws.send(json.dumps(event, ensure_ascii=False))
+            except websockets.ConnectionClosed:
+                pass
         st = asyncio.create_task(server_to_codex())
         ct = asyncio.create_task(codex_to_server())
         done, pending = await asyncio.wait([st, ct], return_when=asyncio.FIRST_COMPLETED)
-        for t in pending: t.cancel()
+        for t in done:
+            if t.exception():
+                logger.warning(f"Task error: {t.exception()}")
+        for t in pending:
+            t.cancel()
     await codex.close()
 
 if __name__ == "__main__":

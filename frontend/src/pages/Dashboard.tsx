@@ -6,7 +6,7 @@ import { DailyGoal, DailyGoalItem, ExamInfo, Plan, Subject } from "@/types";
 import { daysUntil, formatDate, cn } from "@/lib/utils";
 import {
   CalendarDays, Target, TrendingUp, CheckCircle2, Clock, BookOpen,
-  Plus, Trash2, Play, Square, RefreshCw, Pencil, Smile, Frown, Meh,
+  Plus, Trash2, Play, Square, RefreshCw, Pencil, Smile, Frown, Meh, Brain, ExternalLink,
 } from "lucide-react";
 
 const TODAY = new Date().toISOString().slice(0, 10);
@@ -238,6 +238,11 @@ function DailyGoalPanel({ goal, items }: { goal: DailyGoal; items: DailyGoalItem
             <span className={cn("flex-1 text-sm", item.status === "completed" && "line-through text-gray-400")}>
               {item.title}
             </span>
+                            {item.question_id && (
+                              <a href={"/questions"} className="text-xs text-violet-500 hover:text-violet-700 flex items-center gap-0.5 ml-2" title="查看题目详情">
+                                <Brain className="w-3 h-3" />
+                              </a>
+                            )}
 
             {/* Pomodoro timer for in-progress */}
             {item.status === "in_progress" && (

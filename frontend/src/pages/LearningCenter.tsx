@@ -13,7 +13,7 @@ import {
   BookOpen, Lightbulb, RefreshCw, Search,
   Zap, Wifi, WifiOff, Copy, Check, ChevronDown,
   ChevronRight, FileText, Video, FileQuestion, StickyNote,
-  X, FolderOpen, History, Plus, Trash2,
+  X, FolderOpen, History, Plus, Trash2, FileDown, ListPlus, CheckCircle2, Database,
 } from 'lucide-react';
 
 export default function LearningCenter() {
@@ -29,6 +29,10 @@ export default function LearningCenter() {
   const [searchText, setSearchText] = useState('');
   const [materialSearch, setMaterialSearch] = useState('');
   const [codeCopied, setCodeCopied] = useState(false);
+  const BACKEND_URL_QB = import.meta.env.VITE_BACKEND_URL || "https://vq.zrj666.cn";
+  const [extractModal, setExtractModal] = useState<{ questions: any[] } | null>(null);
+  const [extracting, setExtracting] = useState(false);
+
   const [sidebarTab, setSidebarTab] = useState<'knowledge' | 'materials'>('knowledge');
   const [expandedSubjects, setExpandedSubjects] = useState<Set<string>>(new Set());
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -139,6 +143,64 @@ export default function LearningCenter() {
   };
 
   // ---- Render ----
+  // ---- Question Bank handlers ----
+  const handleExtractToBank = async () => {
+    setExtracting(true);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      const lastAssistant = [...messages].reverse().find((m: ChatMessage) => m.role === "assistant");
+      if (!lastAssistant) return;
+      const res = await fetch(BACKEND_URL_QB + "/api/questions/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-User-Id": user!.id },
+        body: JSON.stringify({
+          markdown: lastAssistant.content,
+          conversation_id: conversationId || undefined,
+          knowledge_point_ids: selectedKps.map((k: ContextItem) => k.id),
+        }),
+      });
+      const data = await res.json();
+      setExtractModal({ questions: data.questions || [] });
+    } catch (e) {
+      console.error("Extract failed:", e);
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+  const handleExportToQueue = async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      const lastAssistant = [...messages].reverse().find((m: ChatMessage) => m.role === "assistant");
+      if (!lastAssistant) return;
+      // 先提取题目，再提交导出任务
+      const extractRes = await fetch(BACKEND_URL_QB + "/api/questions/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-User-Id": user!.id },
+        body: JSON.stringify({
+          markdown: lastAssistant.content,
+          conversation_id: conversationId || undefined,
+          knowledge_point_ids: selectedKps.map((k: ContextItem) => k.id),
+        }),
+      });
+      const extractData = await extractRes.json();
+      const ids = (extractData.questions || []).map((q: any) => q.id);
+      if (ids.length === 0) {
+        alert("未检测到可导出的题目");
+        return;
+      }
+      // 提交 PDF 导出任务
+      const taskRes = await fetch(BACKEND_URL_QB + "/api/tasks/queue/pdf-export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-User-Id": user!.id },
+        body: JSON.stringify({ question_ids: ids }),
+      });
+      const taskData = await taskRes.json();
+      alert("PDF 导出任务已提交！(" + ids.length + " 题)\n请在「任务队列」页面查看进度和下载。");
+    } catch (e) {
+      console.error("Export queue failed:", e);
+    }
+  };
   return (
     <div className="flex h-full">
       {/* Left Sidebar */}
@@ -223,6 +285,7 @@ export default function LearningCenter() {
             <div className="p-1">
               {filteredMaterials?.map((m) => {
                 const selected = selectedMaterials.some((c) => c.id === m.id);
+
                 return (
                   <button
                     key={m.id}
@@ -372,6 +435,21 @@ export default function LearningCenter() {
                   <span className="whitespace-pre-wrap">{msg.content}</span>
                 )}
                 {msg.isStreaming && <span className="inline-block w-2 h-4 bg-gray-400 animate-pulse ml-1 align-middle" />}
+                {msg.role === "assistant" && !msg.isStreaming && !turnActive && (
+                  <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                    <button onClick={handleExtractToBank} disabled={extracting}
+                      className="flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-violet-50 dark:bg-violet-950/30 text-violet-600 hover:bg-violet-100 dark:hover:bg-violet-900/40 disabled:opacity-50 transition-colors">
+                      {extracting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Database className="w-3 h-3" />}
+                      提取到题库
+                    </button>
+                    <button onClick={handleExportToQueue}
+                      className="flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-amber-50 dark:bg-amber-950/30 text-amber-600 hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors">
+                      <FileDown className="w-3 h-3" />
+                      导出 PDF
+                    </button>
+                  </div>
+                )}
+
               </div>
               {msg.role === 'user' && (
                 <div className="w-7 h-7 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center flex-shrink-0 mt-0.5">

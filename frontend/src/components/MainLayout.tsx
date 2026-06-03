@@ -12,7 +12,7 @@ import {
   Menu,
   LogOut,
   BarChart3,
-  Brain,
+  Brain, Library, History,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -23,6 +23,8 @@ const navItems = [
   { to: "/knowledge", icon: BookOpen, label: "知识体系" },
   { to: "/materials", icon: FolderOpen, label: "学习资料" },
   { to: "/learning", icon: Brain, label: "AI 学习" },
+  { to: "/queue", icon: History, label: "任务队列" },
+  { to: "/questions", icon: Library, label: "题库" },
   { to: "/statistics", icon: BarChart3, label: "数据统计" },
   { to: "/settings", icon: Settings, label: "设置" },
 ];

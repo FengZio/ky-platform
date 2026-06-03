@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     mineru_poll_interval: int = 3
     mineru_poll_max_retries: int = 200
     mineru_max_pages: int = 200
+    mineru_max_mb: int = 100
 
     # Supabase Storage (MinerU 中转用)
     supabase_storage_bucket: str = "temp-uploads"
@@ -30,3 +31,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+

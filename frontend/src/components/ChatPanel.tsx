@@ -12,7 +12,7 @@ export function ChatPanel() {
   const { session } = useAuth();
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
-    { role: "assistant", content: "你好！我是考研AI助手 🤖 可以问我关于学习计划、知识点、备考策略等问题。比如：「今天该重点复习什么？」" },
+    { role: "assistant", content: "你好！我是考上鸭 🤖 可以问我关于学习计划、知识点、备考策略等问题。比如：「今天该重点复习什么？」" },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -69,7 +69,7 @@ export function ChatPanel() {
           <div className="flex items-center justify-between px-4 py-3 border-b bg-primary-600 text-white rounded-t-2xl">
             <div className="flex items-center gap-2">
               <Sparkles className="w-5 h-5" />
-              <span className="font-semibold text-sm">考研AI助手</span>
+              <span className="font-semibold text-sm">考上鸭</span>
             </div>
             <button onClick={() => setOpen(false)} className="p-1 hover:bg-primary-700 rounded">
               <X className="w-4 h-4" />

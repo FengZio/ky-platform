@@ -1,7 +1,7 @@
 """
 MinerU 文档解析服务
 WebDAV → Supabase Storage(公网URL) → POST /api/v4/extract/task → 轮询 → full.md
-超过 200 页自动切分后合并
+超过 200 页 / 100MB 自动切分后合并
 """
 import asyncio
 import io
@@ -19,6 +19,8 @@ from src.services.supabase import get_admin, get_webdav_config
 
 
 MAX_PDF_PAGES = getattr(settings, "mineru_max_pages", 200)
+MAX_PDF_SIZE_MB = getattr(settings, "mineru_max_mb", 100)
+MAX_PDF_SIZE = MAX_PDF_SIZE_MB * 1024 * 1024
 
 
 def _sanitize_filename(raw_name: str) -> str:
@@ -40,19 +42,45 @@ def _count_pdf_pages(file_bytes: bytes) -> int:
     return count
 
 
-def _split_pdf_bytes(file_bytes: bytes, max_pages: int) -> list[bytes]:
-    """将 PDF 按 max_pages 切分为多个 bytes，每个 ≤ max_pages 页"""
+def _split_pdf_bytes(file_bytes: bytes, max_pages: int, max_bytes: int | None = None) -> list[bytes]:
+    """将 PDF 切分为多个 bytes，同时满足页数上限 (max_pages) 和大小上限 (max_bytes)。
+    先按 max_pages 试切，若某分片超过 max_bytes 则自动减小页数直至满足大小限制。
+    """
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     total = doc.page_count
     chunks = []
-    for start in range(0, total, max_pages):
-        end = min(start + max_pages, total)
-        new_doc = fitz.open()
-        new_doc.insert_pdf(doc, from_page=start, to_page=end - 1)
-        buf = new_doc.tobytes()
-        new_doc.close()
-        chunks.append(buf)
-        print(f"[mineru] Split chunk pages {start+1}-{end} of {total}")
+
+    if max_bytes is None:
+        max_bytes = float("inf")
+
+    start = 0
+    while start < total:
+        pages_left = total - start
+        attempt_pages = min(max_pages, pages_left)
+
+        while attempt_pages > 0:
+            end = start + attempt_pages
+            new_doc = fitz.open()
+            new_doc.insert_pdf(doc, from_page=start, to_page=end - 1)
+            buf = new_doc.tobytes()
+            new_doc.close()
+            size_mb = len(buf) / (1024 * 1024)
+
+            if len(buf) <= max_bytes:
+                chunks.append(buf)
+                print(f"[mineru] Part pages {start+1}-{end}/{total}, {size_mb:.1f}MB")
+                start = end
+                break
+            else:
+                # 超过大小限制 → 减半页数重试 (最少 1 页)
+                print(f"[mineru] Part pages {start+1}-{end} too large ({size_mb:.1f}MB > {max_bytes/1024/1024:.0f}MB), reducing...")
+                attempt_pages = max(attempt_pages // 2, 1)
+        else:
+            doc.close()
+            raise RuntimeError(
+                f"单页 {start+1} 超过 {max_bytes/1024/1024:.0f}MB 限制，无法继续切分"
+            )
+
     doc.close()
     return chunks
 
@@ -185,13 +213,13 @@ async def poll_parse_result(mineru_task_id: str) -> str:
     raise TimeoutError(f"MinerU timeout after {max_retries} polls")
 
 
-# ─── 新接口: 自动检测页数并按需切分 ──────────────────────────
+# ─── 新接口: 自动检测页数/大小并按需切分 ──────────────────────
 
 async def parse_document(user_id: str, webdav_path: str, task_id: str) -> str:
-    """完整解析流程: 下载 → 检测页数 → (可选切分) → 并行提交 → 并行轮询 → 合并
+    """完整解析流程: 下载 → 检测页数+大小 → (可选切分) → 并行提交 → 并行轮询 → 合并
 
-    超过 MAX_PDF_PAGES 页自动切分为多个分片，各分片并行提交和轮询，
-    最后将各分片的 full.md 用双换行拼接返回。
+    同时受 mineru_max_pages (默认 200 页) 和 mineru_max_mb (默认 100MB) 限制，
+    超限时自动切分为多个分片并行处理。
     """
     token = settings.mineru_api_token
     if not token:
@@ -200,15 +228,23 @@ async def parse_document(user_id: str, webdav_path: str, task_id: str) -> str:
     # 1. 下载
     file_bytes, safe_name = await _download_from_webdav(user_id, webdav_path)
 
-    # 2. 检测页数 & 按需切分
+    # 2. 检测页数和大小，判断是否需要切分
     total_pages = _count_pdf_pages(file_bytes)
-    print(f"[mineru] PDF has {total_pages} pages, max={MAX_PDF_PAGES}")
+    total_size_mb = len(file_bytes) / (1024 * 1024)
+    print(f"[mineru] PDF: {total_pages} pages, {total_size_mb:.1f}MB (limits: {MAX_PDF_PAGES}p / {MAX_PDF_SIZE_MB}MB)")
 
-    if total_pages <= MAX_PDF_PAGES:
+    needs_split = total_pages > MAX_PDF_PAGES or len(file_bytes) > MAX_PDF_SIZE
+
+    if not needs_split:
         pdf_parts = [file_bytes]
     else:
-        print(f"[mineru] Splitting into chunks of {MAX_PDF_PAGES} pages...")
-        pdf_parts = _split_pdf_bytes(file_bytes, MAX_PDF_PAGES)
+        reasons = []
+        if total_pages > MAX_PDF_PAGES:
+            reasons.append(f"{total_pages}p > {MAX_PDF_PAGES}p")
+        if len(file_bytes) > MAX_PDF_SIZE:
+            reasons.append(f"{total_size_mb:.1f}MB > {MAX_PDF_SIZE_MB}MB")
+        print(f"[mineru] Splitting because: {', '.join(reasons)}")
+        pdf_parts = _split_pdf_bytes(file_bytes, MAX_PDF_PAGES, MAX_PDF_SIZE)
 
     # 3. 上传各分片到 Storage
     supabase_obj = get_admin()

@@ -8,6 +8,8 @@ import Plans from "@/pages/Plans";
 import Knowledge from "@/pages/Knowledge";
 import Materials from "@/pages/Materials";
 import LearningCenter from "@/pages/LearningCenter";
+import TaskQueue from "@/pages/TaskQueue";
+import QuestionBank from "@/pages/QuestionBank";
 import Statistics from "@/pages/Statistics";
 import Settings from "@/pages/Settings";
 
@@ -27,6 +29,8 @@ export default function App() {
                   <Route path="/knowledge" element={<Knowledge />} />
                   <Route path="/materials" element={<Materials />} />
                   <Route path="/learning" element={<LearningCenter />} />
+                  <Route path="/queue" element={<TaskQueue />} />
+                  <Route path="/questions" element={<QuestionBank />} />
                   <Route path="/statistics" element={<Statistics />} />
                   <Route path="/settings" element={<Settings />} />
                 </Routes>

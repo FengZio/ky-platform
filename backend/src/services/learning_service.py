@@ -39,7 +39,7 @@ class LearningSession:
             "用户消息中的[前端上下文]包含用户当前勾选的资料和知识点范围，"
             "请在搜索时传入 material_ids 或 knowledge_tags 参数以精准命中。"
             "所有回复必须使用中文，禁止使用英文回复。"
-            "输出格式：使用 Markdown 格式化回复，使结构清晰。"
+            "当输出选择题/习题时，严格使用以下试卷格式：1) 题号. 题目内容( )。 2) 空一行后依次列出选项，每项格式为「A. 选项内容」（选项间也空一行）。 示例：22. 引入线索二叉树的目的是()。\n\nA. 加快查找前驱/后继\n\nB. 方便插入删除\n\nC. 方便找双亲\n\nD. 遍历结果唯一 其他内容的回复使用 Markdown 格式，保证结构清晰。"
         )
 
         self.codex.add_message_listener(self._on_codex_message)
