@@ -11,10 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class LearningSession:
-    \"\"\"
-    Manages a single user's learning session, wrapping a CodexService instance
-    and handling the WebSocket communication for real-time chat.
-    \"\"\"
+    """Manages a single user's learning session, wrapping a CodexService instance."""
 
     def __init__(self):
         self.codex: Optional[CodexService] = None
@@ -35,16 +32,18 @@ class LearningSession:
             "你必须始终用中文回复。你是考研全科辅导老师，覆盖："
             "数学（高数/线代/概率论）、408计算机（数据结构/计组/OS/计网）、英语、政治。"
             "可以讲解知识点、分析题型、制定复习计划、答疑解惑。"
-            "重要：用户消息中【系统提示】的内容是向量数据库检索到的参考资料，"
-            "直接基于这些资料回答，不要试图寻找文件。"
+            "你有 MCP 搜索工具可用："
+            "search_knowledge(语义搜索知识点)、"
+            "search_materials(语义搜索学习资料)、"
+            "get_chunk_detail(查看资料详细内容)。"
+            "用户消息中的[前端上下文]包含用户当前勾选的资料和知识点范围，"
+            "请在搜索时传入 material_ids 或 knowledge_tags 参数以精准命中。"
             "所有回复必须使用中文，禁止使用英文回复。"
             "输出格式：使用 Markdown 格式化回复，使结构清晰。"
         )
 
-        # Listen for all messages from Codex
         self.codex.add_message_listener(self._on_codex_message)
 
-        # Start a thread
         result = await self.codex.start_thread(cwd=workspace_root or "")
         thread_data = result if isinstance(result, dict) else {}
         self.thread_id = thread_data.get("id", "") or thread_data.get("threadId", "")
@@ -63,14 +62,11 @@ class LearningSession:
         )
 
     async def _on_codex_message(self, message: dict) -> None:
-        \"\"\"Handle incoming messages from Codex.\"\"\"
         method = message.get("method", "")
         params = message.get("params", {})
 
-        # Extract assistant text from turn item/completed events
         if method in ("turn/item/updated", "turn/item/completed"):
             item = params.get("item", {})
-            # DEBUG: log raw item structure
             _ct = []
             _rc = item.get("content", [])
             if isinstance(_rc, list):
@@ -80,7 +76,6 @@ class LearningSession:
                 method, list(item.keys()), item.get("type","<none>"),
                 item.get("role","<none>"), item.get("status","<none>"), _ct)
             item_type = item.get("type", "")
-            # Skip thinking/reasoning items entirely
             if item_type in ("thinking", "reasoning"):
                 logger.info("[DEBUG_FILTER] Item filtered: type=%s", item_type)
                 return
@@ -114,7 +109,6 @@ class LearningSession:
             })
 
     def _extract_text_from_item(self, item: dict) -> str:
-        """Extract text content from a Codex assistant item, filtering out thinking blocks."""
         content = item.get("content", [])
         if isinstance(content, str):
             return content
@@ -123,7 +117,6 @@ class LearningSession:
             for part in content:
                 if isinstance(part, dict):
                     part_type = part.get("type", "")
-                    # Skip thinking/reasoning blocks
                     if part_type in ("thinking", "reasoning"):
                         logger.info("[DEBUG_FILTER] Content part filtered: type=%s", part_type)
                         continue
@@ -141,7 +134,6 @@ class LearningSession:
         return ""
 
     async def receive(self) -> Optional[dict]:
-        \"\"\"Get the next message from the queue (non-blocking with timeout).\"\"\"
         try:
             return await asyncio.wait_for(self._message_queue.get(), timeout=30.0)
         except asyncio.TimeoutError:
@@ -155,10 +147,7 @@ class LearningSession:
 
 
 class LearningSessionManager:
-    \"\"\"
-    Singleton manager for learning sessions.
-    Each user gets one session (keyed by user_id).
-    \"\"\"
+    """Singleton manager for learning sessions."""
 
     def __init__(self):
         self._sessions: dict[str, LearningSession] = {}
