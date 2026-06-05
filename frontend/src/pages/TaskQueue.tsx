@@ -1,13 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase";
+import { backendFetch } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import {
   Clock, FileDown, FileText, Download, Loader2, CheckCircle2,
   XCircle, RefreshCw, Trash2, History, ChevronRight,
 } from "lucide-react";
-
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "https://vq.zrj666.cn";
 
 interface TaskItem {
   id: string;
@@ -40,11 +39,8 @@ export default function TaskQueue() {
   const { data: tasks, isLoading, refetch } = useQuery({
     queryKey: ["task-queue"],
     queryFn: async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return [];
-      const res = await fetch(`${BACKEND_URL}/api/tasks/queue?limit=30`, {
-        headers: { "X-User-Id": user.id },
-      });
+      const res = await backendFetch("/api/tasks/queue?limit=30");
+      if (res.status === 401) return [];
       return ((await res.json()).tasks || []) as TaskItem[];
     },
     refetchInterval: 3000, // auto-poll every 3s for active tasks
@@ -53,10 +49,7 @@ export default function TaskQueue() {
   const handleDownload = async (task: TaskItem) => {
     setDownloading(task.id);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      const res = await fetch(`${BACKEND_URL}/api/tasks/queue/${task.id}/download`, {
-        headers: { "X-User-Id": user!.id },
-      });
+      const res = await backendFetch(`/api/tasks/queue/${task.id}/download`);
       if (res.ok) {
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);

@@ -1,16 +1,16 @@
 import { createContext, useContext, useState, useRef, useCallback, useEffect, ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
+import { getBackendWsUrl } from "@/lib/backend";
 
 // ---- Types ----
 export type ChatMessage = {
   role: "user" | "assistant" | "system";
   content: string;
   isStreaming?: boolean;
+  reasoning?: string;
 };
 
 export type ContextItem = { id: string; name: string; type: "kp" | "material" };
-
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "https://vq.zrj666.cn";
 
 // Heartbeat: client sends ping every 30s to keep connection alive through proxies
 const HEARTBEAT_MS = 30_000;
@@ -75,7 +75,7 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // ---- WebSocket connection (persistent) ----
-  const connectWs = useCallback(() => {
+  const connectWs = useCallback(async () => {
     if (reconnectTimer.current) {
       clearTimeout(reconnectTimer.current);
       reconnectTimer.current = null;
@@ -85,9 +85,7 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
       try { wsRef.current.close(); } catch {}
     }
 
-    const protocol = BACKEND_URL.startsWith("https") ? "wss" : "ws";
-    const host = BACKEND_URL.replace(/^https?:\/\//, "");
-    const url = protocol + "://" + host + "/api/learning/ws";
+    const url = await getBackendWsUrl("/api/learning/ws");
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
@@ -102,6 +100,10 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
           case "pairing_code":
             setPairingCode(msg.code);
             break;
+          case "error":
+            setTurnActive(false);
+            setMessages((prev) => [...prev, { role: "system", content: msg.text || "连接失败，请重新登录后再试。" }]);
+            break;
           case "agent_connected":
             setAgentConnected(true);
             reconnectAttempt.current = 0;
@@ -110,6 +112,32 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
           case "agent_disconnected":
             setAgentConnected(false);
             setTurnActive(false);
+            setMessages((prev) => [...prev, {
+              role: "system",
+              content: msg.text || "本地 Codex Agent 已断开。请复制配对码，在电脑上运行 local_agent.py 并输入该配对码重新连接。",
+            }]);
+            break;
+          case "reasoning_chunk":
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.role === "assistant" && last.isStreaming) {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                  ...last,
+                  reasoning: (last.reasoning || "") + msg.text,
+                };
+                return updated;
+              }
+              return [...prev, {
+                role: "assistant",
+                content: "",
+                isStreaming: true,
+                reasoning: msg.text,
+              }];
+            });
+            break;
+          case "reasoning_end":
+            // reasoning complete - no action needed, already accumulated
             break;
           case "assistant_chunk":
             setTurnActive(true);

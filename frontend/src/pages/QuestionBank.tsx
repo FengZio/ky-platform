@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase";
+import { backendFetch } from "@/lib/backend";
 import { QuestionBankItem, Subject, Plan, PlanPhase } from "@/types";
 import { cn } from "@/lib/utils";
 import ReactMarkdown from "react-markdown";
@@ -13,7 +14,15 @@ import {
   Star, Loader2,
 } from "lucide-react";
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "https://vq.zrj666.cn";
+// ---- Markdown preprocessor ----
+function preprocessMarkdown(text: string): string {
+  let result = text;
+  // Ensure blank line before table blocks
+  result = result.replace(/([^\n])\n(\|[^\n]+\|\n\|[:\- ]+\|)/g, "$1\n\n$2");
+  // Fix alignment rows missing trailing pipe
+  result = result.replace(/^(\|[ :\-]+\|[ :\-]+):$/gm, "$1|");
+  return result;
+}
 
 const TYPE_LABELS: Record<string, string> = {
   choice: "选择题", short_answer: "简答题", calculation: "计算题",
@@ -56,17 +65,14 @@ export default function QuestionBank() {
   const { data: questions, isLoading } = useQuery({
     queryKey: ["question-bank", filterType, filterDifficulty, filterSource],
     queryFn: async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return [];
       const params = new URLSearchParams();
       if (filterType) params.set("type", filterType);
       if (filterDifficulty > 0) params.set("difficulty", String(filterDifficulty));
       if (filterSource) params.set("source", filterSource);
       params.set("limit", "200");
 
-      const res = await fetch(`${BACKEND_URL}/api/questions?${params}`, {
-        headers: { "X-User-Id": user.id },
-      });
+      const res = await backendFetch(`/api/questions?${params}`);
+      if (res.status === 401) return [];
       const json = await res.json();
       return (json.questions || []) as QuestionBankItem[];
     },
@@ -82,10 +88,8 @@ export default function QuestionBank() {
 
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => {
-      const { data: { user } } = await supabase.auth.getUser();
-      await fetch(`${BACKEND_URL}/api/questions/${id}`, {
+      await backendFetch(`/api/questions/${id}`, {
         method: "DELETE",
-        headers: { "X-User-Id": user!.id },
       });
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["question-bank"] }),
@@ -93,10 +97,9 @@ export default function QuestionBank() {
 
   const toPlanMutation = useMutation({
     mutationFn: async (questionId: string) => {
-      const { data: { user } } = await supabase.auth.getUser();
-      const res = await fetch(`${BACKEND_URL}/api/questions/to-plan`, {
+      const res = await backendFetch("/api/questions/to-plan", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-User-Id": user!.id },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question_id: questionId, plan_id: selectedPlan, phase_id: selectedPhase || undefined }),
       });
       return res.json();
@@ -137,23 +140,17 @@ export default function QuestionBank() {
   const handleExportPdf = async () => {
     setExporting(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       const ids = selected.size > 0 ? Array.from(selected) : (filtered || []).map((q) => q.id);
-      const res = await fetch(`${BACKEND_URL}/api/questions/export/pdf`, {
+      const res = await backendFetch("/api/tasks/queue/pdf-export", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-User-Id": user!.id },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question_ids: ids }),
       });
-      if (res.headers.get("content-type")?.includes("application/pdf")) {
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url; a.download = "questions.pdf"; a.click();
-        URL.revokeObjectURL(url);
+      if (res.ok) {
+        alert("PDF 导出任务已提交，请在「任务队列」页面查看进度和下载。");
       } else {
-        const html = await res.text();
-        const w = window.open("", "_blank")!;
-        w.document.write(html); w.document.close();
+        const json = await res.json().catch(() => ({}));
+        alert("导出失败: " + (json.detail || res.status));
       }
     } finally {
       setExporting(false);

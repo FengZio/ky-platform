@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
+import { backendFetch } from '@/lib/backend';
 import { KnowledgePoint, Subject, LearningMaterial } from '@/types';
 import { cn } from '@/lib/utils';
 import { useLearningWs, type ChatMessage, type ContextItem } from '@/contexts/LearningWsContext';
@@ -16,6 +17,30 @@ import {
   X, FolderOpen, History, Plus, Trash2, FileDown, ListPlus, CheckCircle2, Database,
 } from 'lucide-react';
 
+// ---- Reasoning display ----
+function ReasoningBlock({ text, isStreaming }: { text: string; isStreaming: boolean }) {
+  const [open, setOpen] = useState(true);
+  if (!text) return null;
+  return (
+    <div className="mb-2 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800/50 hover:bg-gray-100 dark:hover:bg-gray-800"
+      >
+        {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+        <Brain className="w-3 h-3" />
+        <span>思考过程{isStreaming ? '...' : ''}</span>
+      </button>
+      {open && (
+        <div className="px-3 py-2 text-xs text-gray-500 dark:text-gray-400 italic leading-relaxed whitespace-pre-wrap max-h-40 overflow-y-auto">
+          {text}
+          {isStreaming && <span className="inline-block w-1.5 h-3.5 bg-gray-300 animate-pulse ml-0.5 align-middle" />}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function LearningCenter() {
   // ---- Context: persistent WS state across page switches ----
   const {
@@ -29,7 +54,6 @@ export default function LearningCenter() {
   const [searchText, setSearchText] = useState('');
   const [materialSearch, setMaterialSearch] = useState('');
   const [codeCopied, setCodeCopied] = useState(false);
-  const BACKEND_URL_QB = import.meta.env.VITE_BACKEND_URL || "https://vq.zrj666.cn";
   const [extractModal, setExtractModal] = useState<{ questions: any[] } | null>(null);
   const [extracting, setExtracting] = useState(false);
 
@@ -49,7 +73,7 @@ export default function LearningCenter() {
   const { data: points } = useQuery({
     queryKey: ['knowledge-points'],
     queryFn: async () => {
-      const { data } = await supabase.from('knowledge_points').select('*').order('sort_order');
+      const { data } = await supabase.from('knowledge_points').select('id,subject_id,parent_id,material_id,name,description,difficulty,importance,sort_order,is_mastered,mastered_at,created_at,updated_at').order('sort_order');
       return data as KnowledgePoint[];
     },
   });
@@ -88,7 +112,16 @@ export default function LearningCenter() {
 
   const filteredMaterials = materials?.filter((m) =>
     !materialSearch || m.title.includes(materialSearch)
-  );
+  ) ?? [];
+
+  const materialsBySubject = filteredMaterials.reduce((acc, material) => {
+    if (!material.subject_id) return acc;
+    if (!acc[material.subject_id]) acc[material.subject_id] = [];
+    acc[material.subject_id].push(material);
+    return acc;
+  }, {} as Record<string, (LearningMaterial & { subject_id?: string; knowledge_point_id?: string })[]>);
+
+  const unassignedMaterials = filteredMaterials.filter((m) => !m.subject_id);
 
   // Auto-scroll
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
@@ -142,6 +175,19 @@ export default function LearningCenter() {
     handleQuickAsk('请围绕「' + topic + '」举一反三，给出2道变体题目，考察相同的核心概念但变换题型或角度。');
   };
 
+  // ---- Markdown preprocessor: fix common AI output formatting issues ----
+  const preprocessMarkdown = (text: string): string => {
+    let result = text;
+
+    // 1. Ensure blank line before table blocks
+    result = result.replace(/([^\n])\n(\|[^\n]+\|\n\|[:\- ]+\|)/g, "$1\n\n$2");
+
+    // 2. Fix alignment rows missing trailing pipe
+    result = result.replace(/^(\|[ :\-]+\|[ :\-]+):$/gm, "$1|");
+
+    return result;
+  };
+
   // ---- LaTeX sanitizer: fix common AI output issues before rendering ----
   const sanitizeLatex = (text: string): string => {
     // 1. Remove zero-width and invisible Unicode characters
@@ -173,12 +219,11 @@ export default function LearningCenter() {
   const handleExtractToBank = async () => {
     setExtracting(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       const lastAssistant = [...messages].reverse().find((m: ChatMessage) => m.role === "assistant");
       if (!lastAssistant) return;
-      const res = await fetch(BACKEND_URL_QB + "/api/questions/extract", {
+      const res = await backendFetch("/api/questions/extract", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-User-Id": user!.id },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           markdown: lastAssistant.content,
           conversation_id: conversationId || undefined,
@@ -196,13 +241,12 @@ export default function LearningCenter() {
 
   const handleExportToQueue = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       const lastAssistant = [...messages].reverse().find((m: ChatMessage) => m.role === "assistant");
       if (!lastAssistant) return;
       // 先提取题目，再提交导出任务
-      const extractRes = await fetch(BACKEND_URL_QB + "/api/questions/extract", {
+      const extractRes = await backendFetch("/api/questions/extract", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-User-Id": user!.id },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           markdown: lastAssistant.content,
           conversation_id: conversationId || undefined,
@@ -216,9 +260,9 @@ export default function LearningCenter() {
         return;
       }
       // 提交 PDF 导出任务
-      const taskRes = await fetch(BACKEND_URL_QB + "/api/tasks/queue/pdf-export", {
+      const taskRes = await backendFetch("/api/tasks/queue/pdf-export", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-User-Id": user!.id },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question_ids: ids }),
       });
       const taskData = await taskRes.json();
@@ -309,28 +353,67 @@ export default function LearningCenter() {
             </div>
           ) : (
             <div className="p-1">
-              {filteredMaterials?.map((m) => {
-                const selected = selectedMaterials.some((c) => c.id === m.id);
-
+              {subjects?.map((subject) => {
+                const subjectMaterials = materialsBySubject[subject.id] || [];
+                if (subjectMaterials.length === 0) return null;
+                const expanded = expandedSubjects.has(subject.id);
                 return (
-                  <button
-                    key={m.id}
-                    onClick={() => toggleMaterial(m)}
-                    className={cn(
-                      'w-full text-left px-2 py-1.5 text-xs rounded flex items-center gap-1.5 hover:bg-gray-100 dark:hover:bg-gray-800',
-                      selected && 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300'
+                  <div key={subject.id} className="mb-0.5">
+                    <button
+                      onClick={() => toggleSubject(subject.id)}
+                      className="w-full flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"
+                    >
+                      {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: subject.color || '#6366f1' }} />
+                      {subject.name}
+                      <span className="text-gray-400 ml-auto">{subjectMaterials.length}</span>
+                    </button>
+                    {expanded && (
+                      <div className="ml-4 border-l border-gray-200 dark:border-gray-700">
+                        {subjectMaterials.slice(0, 50).map((m) => {
+                          const selected = selectedMaterials.some((c) => c.id === m.id);
+                          return (
+                            <button
+                              key={m.id}
+                              onClick={() => toggleMaterial(m)}
+                              className={cn(
+                                'w-full text-left px-2 py-1.5 text-xs rounded flex items-center gap-1.5 hover:bg-gray-100 dark:hover:bg-gray-800',
+                                selected && 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300'
+                              )}
+                            >
+                              <span className={cn('w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center',
+                                selected ? 'bg-primary-600 border-primary-600' : 'border-gray-300 dark:border-gray-600'
+                              )}>
+                                {selected && <Check className="w-2.5 h-2.5 text-white" />}
+                              </span>
+                              {materialIcon(m.type)}
+                              <span className="truncate">{m.title}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
                     )}
-                  >
-                    <span className={cn('w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center',
-                      selected ? 'bg-primary-600 border-primary-600' : 'border-gray-300 dark:border-gray-600'
-                    )}>
-                      {selected && <Check className="w-2.5 h-2.5 text-white" />}
-                    </span>
-                    {materialIcon(m.type)}
-                    <span className="truncate">{m.title}</span>
-                  </button>
+                  </div>
                 );
               })}
+              {unassignedMaterials.length > 0 && (
+                <div className="mt-2 border-t border-gray-100 dark:border-gray-800 pt-2">
+                  <div className="px-2 py-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+                    未关联科目 {unassignedMaterials.length}
+                  </div>
+                  {unassignedMaterials.slice(0, 20).map((m) => (
+                    <div
+                      key={m.id}
+                      className="w-full px-2 py-1.5 text-xs rounded flex items-center gap-1.5 text-gray-400 cursor-not-allowed"
+                      title="请先在学习资料页面手动关联学科"
+                    >
+                      <span className="w-3.5 h-3.5 rounded border border-gray-200 dark:border-gray-700 flex-shrink-0" />
+                      {materialIcon(m.type)}
+                      <span className="truncate">{m.title}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -432,6 +515,9 @@ export default function LearningCenter() {
                 msg.role === 'assistant' ? 'bg-gray-100 dark:bg-gray-800 rounded-bl-md prose prose-sm dark:prose-invert max-w-none' :
                 'bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 text-xs max-w-[90%]'
               )}>
+                {msg.role === 'assistant' && msg.reasoning && (
+                  <ReasoningBlock text={msg.reasoning} isStreaming={!!msg.isStreaming && !msg.content} />
+                )}
                 {msg.role === 'assistant' ? (
                   <ReactMarkdown
                     remarkPlugins={[remarkMath]}
@@ -452,13 +538,19 @@ export default function LearningCenter() {
                       pre: ({ children }) => <pre className="bg-gray-200 dark:bg-gray-700 rounded-lg p-2 my-1 overflow-x-auto text-xs">{children}</pre>,
                       a: ({ children, href }) => <a href={href} className="text-primary-600 underline" target="_blank" rel="noopener">{children}</a>,
                       blockquote: ({ children }) => <blockquote className="border-l-3 border-gray-300 dark:border-gray-600 pl-3 my-1 italic text-gray-600 dark:text-gray-400">{children}</blockquote>,
+                      table: ({ children }) => <div className="overflow-x-auto my-2"><table className="min-w-full border-collapse border border-gray-300 dark:border-gray-600 text-xs">{children}</table></div>,
+                      thead: ({ children }) => <thead className="bg-gray-100 dark:bg-gray-800">{children}</thead>,
+                      tbody: ({ children }) => <tbody className="divide-y divide-gray-200 dark:divide-gray-700">{children}</tbody>,
+                      tr: ({ children }) => <tr className="border-b border-gray-200 dark:border-gray-700">{children}</tr>,
+                      th: ({ children }) => <th className="px-3 py-1.5 text-left font-semibold text-gray-700 dark:text-gray-300 border border-gray-300 dark:border-gray-600 min-w-[80px]">{children}</th>,
+                      td: ({ children }) => <td className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 min-w-[80px]">{children}</td>,
                       hr: () => <hr className="my-2 border-gray-300 dark:border-gray-700" />,
                     }}
                   >
-                    {sanitizeLatex(msg.content)}
+                    {sanitizeLatex(preprocessMarkdown(msg.content))}
                   </ReactMarkdown>
                 ) : (
-                  <span className="whitespace-pre-wrap">{sanitizeLatex(msg.content)}</span>
+                  <span className="whitespace-pre-wrap">{sanitizeLatex(preprocessMarkdown(msg.content))}</span>
                 )}
                 {msg.isStreaming && <span className="inline-block w-2 h-4 bg-gray-400 animate-pulse ml-1 align-middle" />}
                 {msg.role === "assistant" && !msg.isStreaming && !turnActive && (
