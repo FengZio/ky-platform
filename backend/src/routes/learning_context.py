@@ -5,13 +5,65 @@ from src.services.supabase import get_admin
 
 logger = logging.getLogger(__name__)
 
+_SUBJECT_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("数学", ("数学", "高数", "线代", "概率", "极限", "导数", "微分", "积分", "矩阵", "行列式")),
+    ("408", ("408", "计算机", "数据结构", "计组", "组成原理", "操作系统", "os", "计网", "网络", "二叉树", "链表", "排序", "进程", "线程", "内存")),
+    ("英语", ("英语", "阅读", "作文", "翻译", "完形", "词汇", "长难句")),
+    ("政治", ("政治", "马原", "毛概", "史纲", "思修", "时政")),
+)
+
+_SUBJECT_NAME_ALIASES: dict[str, tuple[str, ...]] = {
+    "数学": ("数学", "高数", "线代", "概率"),
+    "408": ("408", "计算机", "数据结构", "计组", "操作系统", "计网"),
+    "英语": ("英语",),
+    "政治": ("政治",),
+}
+
 
 class ContextRequest(BaseModel):
     message: str
     kp_ids: list[str] = []
     material_ids: list[str] = []
+    subject_id: str = ""
     top_k: int = 5
     min_score: float = 0.3
+
+
+def _subject_matches_label(subject_name: str, label: str) -> bool:
+    name = (subject_name or "").lower()
+    return any(alias.lower() in name for alias in _SUBJECT_NAME_ALIASES.get(label, (label,)))
+
+
+def _infer_subject_id(message: str) -> str | None:
+    try:
+        resp = get_admin().table("subjects").select("id,name").execute()
+        subjects = resp.data or []
+    except Exception as e:
+        print("[CTX] subject route load fail: %s", e)
+        return None
+
+    q = (message or "").lower()
+    direct_matches = [
+        s for s in subjects
+        if s.get("name") and s["name"].lower() in q
+    ]
+    if len(direct_matches) == 1:
+        return direct_matches[0].get("id")
+
+    matched_labels = [
+        label for label, keywords in _SUBJECT_ROUTES
+        if any(keyword.lower() in q for keyword in keywords)
+    ]
+    if len(matched_labels) != 1:
+        return None
+
+    candidates = [
+        s for s in subjects
+        if s.get("id") and _subject_matches_label(s.get("name", ""), matched_labels[0])
+    ]
+    if len(candidates) == 1:
+        return candidates[0].get("id")
+    return None
 
 
 async def search_vector_context(req: ContextRequest) -> str:
@@ -31,6 +83,9 @@ async def search_vector_context(req: ContextRequest) -> str:
 
     client = get_admin()
     results = []
+    subject_id = req.subject_id or _infer_subject_id(req.message)
+    if subject_id:
+        print("[CTX] subject route: %s", subject_id)
 
     try:
         chunk_resp = client.rpc(
@@ -40,6 +95,7 @@ async def search_vector_context(req: ContextRequest) -> str:
                 "p_material_ids": req.material_ids or None,
                 "p_top_k": req.top_k * 2,
                 "p_min_score": req.min_score,
+                "p_subject_id": subject_id,
             },
         ).execute()
         chunk_rows = chunk_resp.data or []
@@ -63,6 +119,7 @@ async def search_vector_context(req: ContextRequest) -> str:
                 "p_kp_ids": req.kp_ids or None,
                 "p_top_k": req.top_k,
                 "p_min_score": req.min_score,
+                "p_subject_id": subject_id,
             },
         ).execute()
         kp_rows = kp_resp.data or []
