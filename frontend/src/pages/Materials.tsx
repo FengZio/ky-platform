@@ -23,7 +23,7 @@ const TYPE_LABELS: Record<string, string> = {
   other: "其他",
 };
 
-export default function Materials() {
+export default function Materials({ embedded = false }: { embedded?: boolean }) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [showForm, setShowForm] = useState(false);
@@ -74,9 +74,13 @@ export default function Materials() {
   });
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className={embedded ? "space-y-6" : "max-w-4xl mx-auto space-y-6"}>
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">学习资料</h1>
+        {embedded ? (
+          <h2 className="text-lg font-semibold">学习资料</h2>
+        ) : (
+          <h1 className="text-2xl font-bold">学习资料</h1>
+        )}
         <button
           onClick={() => setShowForm(!showForm)}
           className="flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium hover:bg-primary-700"

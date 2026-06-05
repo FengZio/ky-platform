@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/supabase";
+import { WorkspacePageShell } from "@/components/WorkspacePageShell";
 import { Plan, PlanPhase, Subject, ExamInfo } from "@/types";
 import { formatDate } from "@/lib/utils";
 import {
@@ -74,9 +75,10 @@ export default function Plans() {
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">长计划</h1>
+    <WorkspacePageShell
+      title="计划"
+      description="管理长期复习安排和阶段节奏。"
+      actions={
         <button
           onClick={() => setShowForm(!showForm)}
           className="flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium hover:bg-primary-700"
@@ -84,7 +86,9 @@ export default function Plans() {
           <Plus className="w-4 h-4" />
           新建计划
         </button>
-      </div>
+      }
+      contentClassName="max-w-4xl mx-auto space-y-6"
+    >
 
       {showForm && (
         <PlanForm
@@ -199,7 +203,7 @@ export default function Plans() {
           <p>还没有计划，点击「新建计划」开始吧</p>
         </div>
       )}
-    </div>
+    </WorkspacePageShell>
   );
 }
 

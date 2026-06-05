@@ -425,7 +425,7 @@ export default function LearningCenter() {
         <div className="px-5 py-3 border-b flex items-center justify-between bg-white dark:bg-gray-900">
           <div className="flex items-center gap-2">
             <Brain className="w-5 h-5 text-primary-600" />
-            <span className="font-semibold text-sm">AI 学习中心</span>
+            <span className="font-semibold text-sm">学习中心</span>
             <span className={cn('flex items-center gap-1 text-xs px-2 py-0.5 rounded-full',
               agentConnected ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' :
               'bg-gray-100 dark:bg-gray-800 text-gray-500')}>

@@ -1,31 +1,24 @@
 import { ReactNode, useState } from "react";
 import { LearningWsProvider } from "@/contexts/LearningWsContext";
 import { useAuth } from "@/contexts/AuthContext";
-import { NavLink, useLocation } from "react-router-dom";
+import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard,
   CalendarRange,
-  BookOpen,
-  FolderOpen,
   Settings,
   GraduationCap,
   Menu,
   LogOut,
-  BarChart3,
-  Brain, Library, History,
+  Brain, Library,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
-  { to: "/", icon: LayoutDashboard, label: "仪表盘" },
-  { to: "/plans", icon: CalendarRange, label: "长计划" },
-  { to: "/knowledge", icon: BookOpen, label: "知识体系" },
-  { to: "/materials", icon: FolderOpen, label: "学习资料" },
-  { to: "/learning", icon: Brain, label: "AI 学习" },
-  { to: "/queue", icon: History, label: "任务队列" },
-  { to: "/questions", icon: Library, label: "题库" },
-  { to: "/statistics", icon: BarChart3, label: "数据统计" },
+  { to: "/", icon: LayoutDashboard, label: "总览" },
+  { to: "/learning", icon: Brain, label: "学习中心" },
+  { to: "/resources", icon: Library, label: "资源库" },
+  { to: "/plans", icon: CalendarRange, label: "计划" },
   { to: "/settings", icon: Settings, label: "设置" },
 ];
 

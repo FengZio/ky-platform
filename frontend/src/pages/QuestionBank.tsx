@@ -49,7 +49,7 @@ function safeOptions(opts: QuestionBankItem["options"]): { label: string; text: 
   return opts as { label: string; text: string }[];
 }
 
-export default function QuestionBank() {
+export default function QuestionBank({ embedded = false }: { embedded?: boolean }) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState("");
@@ -169,10 +169,10 @@ export default function QuestionBank() {
   });
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className={embedded ? "space-y-6" : "max-w-4xl mx-auto space-y-6"}>
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <Brain className="w-6 h-6 text-primary-600" />
+        <h1 className={cn("font-bold flex items-center gap-2", embedded ? "text-lg" : "text-2xl")}>
+          <Brain className={embedded ? "w-5 h-5 text-primary-600" : "w-6 h-6 text-primary-600"} />
           题库
         </h1>
       </div>

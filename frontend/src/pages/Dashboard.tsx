@@ -2,11 +2,13 @@ import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
+import { OverviewStatistics } from "@/components/OverviewStatistics";
+import { WorkspacePageShell } from "@/components/WorkspacePageShell";
 import { DailyGoal, DailyGoalItem, ExamInfo, Plan, Subject } from "@/types";
 import { daysUntil, formatDate, cn } from "@/lib/utils";
 import {
   CalendarDays, Target, TrendingUp, CheckCircle2, Clock, BookOpen,
-  Plus, Trash2, Play, Square, RefreshCw, Pencil, Smile, Frown, Meh, Brain, ExternalLink,
+  Plus, Trash2, Play, Square, RefreshCw, Pencil, Smile, Frown, Meh, Brain,
 } from "lucide-react";
 
 const TODAY = new Date().toISOString().slice(0, 10);
@@ -63,8 +65,11 @@ export default function Dashboard() {
   ];
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
-      <h1 className="text-2xl font-bold">仪表盘</h1>
+    <WorkspacePageShell
+      title="总览"
+      description="查看今日任务、复习节奏和近期学习趋势。"
+      contentClassName="max-w-6xl mx-auto space-y-6"
+    >
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -124,7 +129,9 @@ export default function Dashboard() {
           )}
         </div>
       </div>
-    </div>
+
+      <OverviewStatistics />
+    </WorkspacePageShell>
   );
 }
 

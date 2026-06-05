@@ -32,7 +32,7 @@ const TASK_TYPE_LABELS: Record<string, { label: string; icon: typeof FileText }>
   doc_parse: { label: "资料解析", icon: FileText },
 };
 
-export default function TaskQueue() {
+export default function TaskQueue({ embedded = false }: { embedded?: boolean }) {
   const queryClient = useQueryClient();
   const [downloading, setDownloading] = useState<string | null>(null);
 
@@ -68,10 +68,10 @@ export default function TaskQueue() {
   const activeCount = (tasks || []).filter((t) => t.status === "queued" || t.status === "processing").length;
 
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className={embedded ? "space-y-6" : "max-w-3xl mx-auto space-y-6"}>
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <History className="w-6 h-6 text-primary-600" />
+        <h1 className={cn("font-bold flex items-center gap-2", embedded ? "text-lg" : "text-2xl")}>
+          <History className={embedded ? "w-5 h-5 text-primary-600" : "w-6 h-6 text-primary-600"} />
           任务队列
         </h1>
         <div className="flex items-center gap-3">
