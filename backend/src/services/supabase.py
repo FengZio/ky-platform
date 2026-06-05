@@ -57,22 +57,27 @@ async def get_ai_config(user_id: str) -> dict:
 
 def create_parse_task(material_id: str) -> dict:
     """创建解析任务记录，返回包含 id 的 task 字典"""
-    res = get_admin().table("parse_tasks").insert({
-        "material_id": material_id,
-        "status": "queued",
-        "progress_pct": 0,
-    }).execute()
-    # 兼容 supabase-py v2 (APIResponse) 与 v3 (直接返回 data)
-    data = res.data if hasattr(res, "data") else res
-    if isinstance(data, list) and len(data) > 0:
-        task = data[0]
-    elif isinstance(data, dict):
-        task = data
-    else:
-        task = {}
-    if not task.get("id"):
-        raise RuntimeError(f"create_parse_task: Supabase insert 未返回 id, data={data}")
-    return task
+    try:
+        res = get_admin().table("parse_tasks").insert({
+            "material_id": material_id,
+            "status": "queued",
+            "progress_pct": 0,
+        }).execute()
+        # 兼容 supabase-py v2 (APIResponse) 与 v3 (直接返回 data)
+        data = res.data if hasattr(res, "data") else res
+        if isinstance(data, list) and len(data) > 0:
+            task = data[0]
+        elif isinstance(data, dict):
+            task = data
+        else:
+            task = {}
+        if not task.get("id"):
+            raise RuntimeError(f"create_parse_task: Supabase insert did not return id, data={data}")
+        return task
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"create_parse_task failed: {e}")
 
 
 def update_parse_task(task_id: str, status: str, progress_pct: int = 0, message: str | None = None,
@@ -87,18 +92,31 @@ def update_parse_task(task_id: str, status: str, progress_pct: int = 0, message:
         payload["message"] = message
     if result_json is not None:
         payload["result_json"] = result_json
-    get_admin().table("parse_tasks").update(payload).eq("id", task_id).execute()
+    try:
+        get_admin().table("parse_tasks").update(payload).eq("id", task_id).execute()
+    except Exception as e:
+        print(f"[supabase] update_parse_task({task_id}) failed: {e}")
 
 
-def get_parse_task(task_id: str) -> dict | None:
+def get_parse_task(task_id: str, user_id: str | None = None) -> dict | None:
     """查询单个任务"""
-    res = get_admin().table("parse_tasks").select("*").eq("id", task_id).maybe_single().execute()
-    data = res.data if hasattr(res, "data") else res
-    if isinstance(data, dict):
-        return data
-    if isinstance(data, list) and len(data) > 0:
-        return data[0]
-    return None
+    try:
+        query = get_admin().table("parse_tasks").select("*").eq("id", task_id)
+        if user_id:
+            material_ids = _get_user_material_ids(user_id)
+            if not material_ids:
+                return None
+            query = query.in_("material_id", material_ids)
+        res = query.maybe_single().execute()
+        data = res.data if hasattr(res, "data") else res
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list) and len(data) > 0:
+            return data[0]
+        return None
+    except Exception as e:
+        print(f"[supabase] get_parse_task({task_id}) failed: {e}")
+        return None
 
 
 # ─── Storage 临时上传 (供 MinerU 等外部服务获取公网 URL) ──────
@@ -128,10 +146,39 @@ def delete_temp_file(file_name: str) -> None:
         print(f"[storage] Delete failed for {path}: {e}")
 
 
-def list_parse_tasks(limit: int = 20) -> list[dict]:
+def _get_user_material_ids(user_id: str) -> list[str]:
+    """返回用户拥有的学习资料 ID。"""
+    try:
+        res = (
+            get_admin()
+            .table("learning_materials")
+            .select("id")
+            .eq("uploaded_by", user_id)
+            .execute()
+        )
+        data = res.data if hasattr(res, "data") else res
+        if not isinstance(data, list):
+            return []
+        return [row["id"] for row in data if row.get("id")]
+    except Exception as e:
+        print(f"[supabase] _get_user_material_ids({user_id}) failed: {e}")
+        return []
+
+
+def list_parse_tasks(limit: int = 20, user_id: str | None = None) -> list[dict]:
     """列出最近任务"""
-    res = get_admin().table("parse_tasks").select("*").order("created_at", desc=True).limit(limit).execute()
-    data = res.data if hasattr(res, "data") else res
-    if isinstance(data, list):
-        return data
-    return []
+    try:
+        query = get_admin().table("parse_tasks").select("*")
+        if user_id:
+            material_ids = _get_user_material_ids(user_id)
+            if not material_ids:
+                return []
+            query = query.in_("material_id", material_ids)
+        res = query.order("created_at", desc=True).limit(limit).execute()
+        data = res.data if hasattr(res, "data") else res
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception as e:
+        print(f"[supabase] list_parse_tasks failed: {e}")
+        return []

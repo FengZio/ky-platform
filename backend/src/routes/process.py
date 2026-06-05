@@ -7,7 +7,7 @@ GET  /api/tasks       列出最近任务
 import asyncio
 import traceback
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
 
 from src.services.supabase import (
@@ -40,14 +40,25 @@ class TaskSubmitRequest(BaseModel):
 # ─── POST /api/tasks — 提交任务 ─────────────────────────────
 
 @router.post("")
-async def submit_task(body: TaskSubmitRequest, background_tasks: BackgroundTasks):
+async def submit_task(req: Request, body: TaskSubmitRequest, background_tasks: BackgroundTasks):
     """提交解析任务，返回 task_id，后台异步处理"""
     try:
+        current_user = getattr(req.state, "user_id", None)
+        if not current_user:
+            raise HTTPException(401, "Not authenticated")
+
         supabase = get_admin()
         mid = body.material_id
 
         # 查资料记录 (获取 user_id 和 webdav_path)
-        res = supabase.table("learning_materials").select("*").eq("id", mid).maybe_single().execute()
+        res = (
+            supabase.table("learning_materials")
+            .select("*")
+            .eq("id", mid)
+            .eq("uploaded_by", current_user)
+            .maybe_single()
+            .execute()
+        )
         material = _safe_data(res)
         if not material:
             raise HTTPException(404, "Material not found")
@@ -57,10 +68,12 @@ async def submit_task(body: TaskSubmitRequest, background_tasks: BackgroundTasks
         if not wd_path:
             raise HTTPException(400, "No webdav_path available")
 
-        # 获取上传者 ID (兼容旧数据的 user_id 字段)
-        user_id = material.get("uploaded_by") or material.get("user_id", "")
+        # 获取上传者 ID
+        user_id = material.get("uploaded_by", "")
         if not user_id:
-            raise HTTPException(400, "Material has no owner info (uploaded_by or user_id)")
+            raise HTTPException(400, "Material has no owner info (uploaded_by)")
+        if user_id != current_user:
+            raise HTTPException(403, "Material does not belong to current user")
 
         # 创建任务记录
         task = create_parse_task(mid)
@@ -81,9 +94,13 @@ async def submit_task(body: TaskSubmitRequest, background_tasks: BackgroundTasks
 # ─── GET /api/tasks/{task_id} — 查询状态 ────────────────────
 
 @router.get("/{task_id}")
-async def get_task(task_id: str):
+async def get_task(req: Request, task_id: str):
     """查询解析任务状态"""
-    task = get_parse_task(task_id)
+    user = getattr(req.state, "user_id", None)
+    if not user:
+        raise HTTPException(401, "Not authenticated")
+
+    task = get_parse_task(task_id, user)
     if not task:
         raise HTTPException(404, "Task not found")
 
@@ -97,7 +114,7 @@ async def get_task(task_id: str):
             if datetime.now(timezone.utc) - updated > timedelta(minutes=10):
                 update_parse_task(task_id, "failed", task["progress_pct"],
                                   message="任务中断，请重新触发")
-                task = get_parse_task(task_id)
+                task = get_parse_task(task_id, user)
 
     return {
         "task_id": task["id"],
@@ -112,9 +129,13 @@ async def get_task(task_id: str):
 # ─── GET /api/tasks — 任务列表 ──────────────────────────────
 
 @router.get("")
-async def list_tasks(limit: int = 20):
+async def list_tasks(req: Request, limit: int = 20):
     """列出最近任务"""
-    tasks = list_parse_tasks(limit)
+    user = getattr(req.state, "user_id", None)
+    if not user:
+        raise HTTPException(401, "Not authenticated")
+
+    tasks = list_parse_tasks(limit, user)
     # 批量获取 material 标题
     material_ids = list(set(t.get("material_id") for t in tasks if t.get("material_id")))
     title_map = {}

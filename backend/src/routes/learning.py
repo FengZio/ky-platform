@@ -11,9 +11,10 @@ REST:
 import json
 import logging
 import asyncio
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query
 from src.services.relay_service import relay
 from src.routes.learning_context import search_vector_context, ContextRequest
+from src.services.auth import get_ws_token, verify_supabase_token
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +26,16 @@ router = APIRouter(prefix="/api/learning", tags=["learning"])
 # ======================================================================
 
 @router.websocket("/ws")
-async def browser_websocket(ws: WebSocket):
+async def browser_websocket(ws: WebSocket, token: str = Query(default="")):
     """Browser connects, gets a pairing code for the local agent to use"""
+    try:
+        verify_supabase_token(get_ws_token(ws, token))
+    except HTTPException:
+        await ws.accept()
+        await ws.send_json({"type": "error", "text": "请先登录后再连接 AI 学习中心。"})
+        await ws.close(code=1008)
+        return
+
     await ws.accept()
     code, message_queue = await relay.register_browser(ws)
 
