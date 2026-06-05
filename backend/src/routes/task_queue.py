@@ -92,9 +92,15 @@ async def get_task(req: Request, task_id: str):
     if not user:
         raise HTTPException(status_code=401)
 
-    res = get_admin().table("task_queue").select("*")\
-        .eq("id", task_id).eq("user_id", user).single().execute()
+    try:
+        res = get_admin().table("task_queue").select("*")\
+            .eq("id", task_id).eq("user_id", user).limit(1).execute()
+    except Exception as e:
+        logger.error(f"get_task({task_id}) query failed: {e}")
+        raise HTTPException(status_code=500, detail=f"查询任务失败: {str(e)[:200]}")
     data = _safe(res)
+    if isinstance(data, list):
+        data = data[0] if data else None
     if not data:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"task": data}
@@ -107,31 +113,54 @@ async def download_task(req: Request, task_id: str):
     if not user:
         raise HTTPException(status_code=401)
 
-    res = get_admin().table("task_queue").select("*")\
-        .eq("id", task_id).eq("user_id", user).single().execute()
+    # 使用 maybe_single() 避免 supabase-py 的 204/406 报错
+    try:
+        res = get_admin().table("task_queue").select("*")\
+            .eq("id", task_id).eq("user_id", user).limit(1).execute()
+    except Exception as e:
+        logger.error(f"download_task({task_id}) query failed: {e}")
+        raise HTTPException(status_code=500, detail=f"查询任务失败: {str(e)[:200]}")
+
     task = _safe(res)
+    if isinstance(task, list):
+        task = task[0] if task else None
     if not task:
-        raise HTTPException(status_code=404)
-    if task["status"] != "done":
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.get("status") != "done":
         raise HTTPException(status_code=400, detail="Task not completed yet")
 
     result = task.get("result_json") or {}
+    # result_json 可能是 JSON 字符串（TEXT 列）或 dict（JSONB 列）
+    if isinstance(result, str):
+        try:
+            import json
+            result = json.loads(result)
+        except Exception:
+            logger.warning(f"download_task({task_id}): result_json is not valid JSON")
+            raise HTTPException(status_code=500, detail="任务结果数据损坏")
+
     download_url = result.get("download_url", "")
     if not download_url:
         raise HTTPException(status_code=404, detail="No download available")
 
     # For Supabase Storage URLs, redirect; for others, return
     import httpx
-    async with httpx.AsyncClient() as client:
-        r = await client.get(download_url)
-        if r.status_code == 200:
-            content_type = result.get("content_type", "application/pdf")
-            filename = result.get("filename", "download.pdf")
-            return Response(
-                content=r.content,
-                media_type=content_type,
-                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-            )
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get(download_url)
+            if r.status_code == 200:
+                content_type = result.get("content_type", "application/pdf")
+                filename = result.get("filename", "download.pdf")
+                return Response(
+                    content=r.content,
+                    media_type=content_type,
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
+            else:
+                logger.error(f"download_task({task_id}): fetch file returned {r.status_code}")
+    except Exception as e:
+        logger.error(f"download_task({task_id}): fetch file failed: {e}")
+
     raise HTTPException(status_code=502, detail="Failed to fetch file")
 
 
