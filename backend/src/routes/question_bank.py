@@ -3,16 +3,15 @@
 import hashlib
 import json
 import logging
-import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Query
-from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from src.services.supabase import get_admin
+import re as _re
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +40,19 @@ class ExtractRequest(BaseModel):
     conversation_id: Optional[str] = None
     knowledge_point_ids: list[str] = Field(default_factory=list)
 
-class ExportRequest(BaseModel):
-    question_ids: list[str]
-
 class ToPlanRequest(BaseModel):
     question_id: str
     plan_id: str
     phase_id: Optional[str] = None
+
+
+TYPE_LABELS = {
+    "choice": "选择题",
+    "short_answer": "简答题",
+    "calculation": "计算题",
+    "essay": "论述题",
+    "true_false": "判断题",
+}
 
 # ============================================================
 # Helpers
@@ -170,6 +175,35 @@ async def delete_question(req: Request, question_id: str):
 # AI 提取题目 (json_object 回退)
 # ============================================================
 
+
+def _repair_json_strings(text):
+    """修复 JSON 字符串中的常见问题：未转义的反斜杠、未终止的字符串等"""
+    # 修复未转义的反斜杠（在 JSON 字符串内 \d, \f 等应为 \\d, \\f）
+    text = _re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
+    return text
+
+
+def _repair_llm_json(text):
+    """Fix common LLM JSON output issues"""
+    # 1. Remove illegal control characters
+    text = _re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    # 2. Fix unescaped backslashes
+    text = _repair_json_strings(text)
+    # 3. Fix unterminated strings
+    fixed_lines = []
+    for line in text.split("\n"):
+        s = line.rstrip()
+        if s and s.count(chr(34)) % 2 != 0:
+            if not s.endswith(chr(34)):
+                s = s + chr(34)
+        fixed_lines.append(s)
+    text = "\n".join(fixed_lines)
+    # 4. Balance brackets
+    if not text.rstrip().endswith("}"):
+        ob = text.count("{") - text.count("}")
+        obr = text.count("[") - text.count("]")
+        text = text.rstrip() + "]" * max(0, obr) + "}" * max(0, ob)
+    return text
 QUESTION_SCHEMA = {"type": "json_object"}
 
 EXTRACT_PROMPT = """你是一个考研题库结构化提取器。请从以下 AI 对话回复中提取所有题目，输出一个纯净的 JSON 对象。
@@ -241,30 +275,39 @@ async def extract_questions(req: Request, body: ExtractRequest):
             content_clean = content_clean[:-3]
         content_clean = content_clean.strip()
 
-    # 修复 LLM 输出中常见的 JSON 格式问题
-    # 1. 修复未转义的反斜杠（在 JSON 字符串内 \d, \f 等应为 \\d, \\f）
-    import re
-    # 2. 如果 JSON 被截断，尝试修复尾部
-    if not content_clean.endswith("}"):
-        # 尝试补全
-        content_clean = content_clean.rstrip() + "}]}"
+    # 修复 LLM 输出中常见的 JSON 格式问题（未终止字符串、缺失括号等）
+    content_clean = _repair_llm_json(content_clean)
 
+    parsed = None
     try:
         parsed = json.loads(content_clean)
-    except json.JSONDecodeError as e:
-        # 回退：用正则提取 questions 数组
-        logger.warning(f"LLM JSON parse error, trying fallback: {e}")
-        match = re.search(r'"questions"\s*:\s*(\[.*\])', content_raw, re.DOTALL)
+    except json.JSONDecodeError:
+        # Try fixing trailing commas
+        try:
+            fixed = _re.sub(r',\s*([}\]])', r'\1', content_clean)
+            parsed = json.loads(fixed)
+            logger.info("LLM JSON parsed after trailing comma fix")
+        except json.JSONDecodeError as e:
+            pass  # fall through to regex fallback
+
+    if parsed is None:
+        # Fallback: regex extract questions array
+        logger.warning("LLM JSON parse error, trying regex fallback")
+        match = _re.search(r'"questions"\s*:\s*(\[[\s\S]*?\])(?=\s*\})', content_raw)
+        if not match:
+            match = _re.search(r'"questions"\s*:\s*(\[.*)', content_raw, _re.DOTALL)
         if match:
             try:
                 questions_raw = match.group(1)
-                # 修复未转义的反斜杠
-                questions_raw = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', questions_raw)
+                questions_raw = _repair_json_strings(questions_raw)
                 parsed = {"questions": json.loads(questions_raw)}
-            except Exception:
-                raise HTTPException(status_code=502, detail=f"Failed to parse LLM output: {str(e)[:200]}")
+            except Exception as ex2:
+                logger.error(f"Fallback parse also failed: {ex2}")
+                logger.error(f"Raw content (first 1000 chars): {content_raw[:1000]}")
+                return {"status": "error", "message": f"Unable to parse AI output: {str(ex2)[:200]}", "questions": []}
         else:
-            raise HTTPException(status_code=502, detail=f"Failed to parse LLM output: {str(e)[:200]}")
+            logger.error(f"No questions array found in LLM output. Raw: {content_raw[:500]}")
+            return {"status": "error", "message": "No question format detected in AI response", "questions": []}
 
     questions = parsed.get("questions", [])
 
