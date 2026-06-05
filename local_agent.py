@@ -25,6 +25,8 @@ class CodexProcess:
         self._lock = asyncio.Lock()
         self._codex_events = asyncio.Queue()
         self._first_message = True
+        self._current_reasoning_text = ""
+        self._reasoning_sent = False
 
     async def start(self):
         os.makedirs(self.workspace_dir, exist_ok=True)
@@ -55,6 +57,7 @@ class CodexProcess:
         system_prompt = (
             "你是考研辅导老师，用中文回复。用 MCP 工具 search_materials/search_knowledge 搜索资料后回答。\n"
             "用户消息中[前端上下文]含 material_ids/kp_ids 用于精准搜索。\n"
+            "搜索时按学科路由：数学=高数/线代/概率/极限/导数/积分，408=数据结构/计组/OS/计网/二叉树/链表/排序/进程/内存，英语=阅读/作文/翻译/完形/词汇，政治=马原/毛概/史纲/思修/时政；无法判断或多学科混合时全库搜索。\n"
             "回复简洁，Markdown 格式。\n\n"
         )
         text = system_prompt + text
@@ -104,6 +107,13 @@ class CodexProcess:
         # item/started: track current item type
         if method == "item/started":
             if item_type == "agentMessage":
+                # Send collected reasoning before starting reply
+                if self._current_reasoning_text and not self._reasoning_sent:
+                    await self._codex_events.put({
+                        "type": "reasoning_end",
+                        "text": self._current_reasoning_text,
+                    })
+                    self._reasoning_sent = True
                 self._current_assistant_text = ""
                 self._current_assistant_id = item.get("id", "")
             return
@@ -121,6 +131,23 @@ class CodexProcess:
             delta_text = self._extract_delta_text(params)
             if delta_text:
                 self._current_assistant_text += delta_text
+            return
+
+        # item/reasoning/summaryTextDelta: accumulate reasoning text
+        if method == "item/reasoning/summaryTextDelta":
+            delta_text = self._extract_delta_text(params)
+            if delta_text:
+                self._current_reasoning_text += delta_text
+                await self._codex_events.put({
+                    "type": "reasoning_chunk",
+                    "text": delta_text,
+                })
+            return
+
+        # item/reasoning/summaryPartAdded: reset reasoning for new turn
+        if method == "item/reasoning/summaryPartAdded":
+            self._current_reasoning_text = ""
+            self._reasoning_sent = False
             return
 
         # item/completed: finalize and emit
