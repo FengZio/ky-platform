@@ -139,6 +139,23 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
           case "reasoning_end":
             // reasoning complete - no action needed, already accumulated
             break;
+          case "mcp_status": {
+            const server = msg.server || "MCP";
+            const status = msg.status || "unknown";
+            const content = msg.error
+              ? `${server} 连接失败：${msg.error}`
+              : `${server} 状态：${status}`;
+            setMessages((prev) => [...prev, { role: "system", content }]);
+            break;
+          }
+          case "tool_call": {
+            const tool = msg.tool ? `${msg.server || "MCP"}/${msg.tool}` : "MCP 工具";
+            setMessages((prev) => [...prev, { role: "system", content: `正在调用 ${tool}...` }]);
+            break;
+          }
+          case "tool_output_chunk":
+            // Tool output is logged by the agent; keeping it out of chat avoids noisy transcripts.
+            break;
           case "assistant_chunk":
             setTurnActive(true);
             setMessages((prev) => {

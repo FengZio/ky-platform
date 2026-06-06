@@ -1,4 +1,4 @@
-"""Question Bank Routes --- 题库 CRUD + AI 提取 + PDF 导出 + 加入计划"""
+"""Resources Question Routes --- 资源库题库 CRUD + AI 提取 + PDF 导出 + 加入计划"""
 
 import hashlib
 import json
@@ -15,7 +15,7 @@ import re as _re
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/questions", tags=["questions"])
+router = APIRouter(prefix="/api/resources/questions", tags=["resources_questions"])
 
 # ============================================================
 # Pydantic Models

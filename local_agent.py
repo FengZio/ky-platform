@@ -5,6 +5,8 @@ import websockets
 SERVER_URL = os.getenv("CODEX_AGENT_SERVER", "wss://vq.zrj666.cn")
 PAIRING_CODE = os.getenv("CODEX_AGENT_CODE", "")
 CODEX_COMMAND = os.getenv("CODEX_AGENT_COMMAND", "codex")
+PROJECT_ROOT = os.getenv("CODEX_AGENT_PROJECT_ROOT", os.path.dirname(os.path.abspath(__file__)))
+CODEX_CWD = os.getenv("CODEX_AGENT_CWD", PROJECT_ROOT)
 WORKSPACE_ROOT = os.getenv("CODEX_AGENT_WORKSPACE", os.path.join(os.environ.get("TEMP", "/tmp"), "codex-agent-workspaces"))
 RECONNECT_DELAY = 5
 MAX_RECONNECT_DELAY = 60
@@ -27,21 +29,30 @@ class CodexProcess:
         self._first_message = True
         self._current_reasoning_text = ""
         self._reasoning_sent = False
+        self._current_assistant_text = ""
+        self._current_assistant_id = ""
+        self._stderr_task = None
+        self.codex_cwd = os.path.abspath(CODEX_CWD)
 
     async def start(self):
         os.makedirs(self.workspace_dir, exist_ok=True)
         logger.info(f"Workspace: {self.workspace_dir}")
+        logger.info(f"Codex cwd: {self.codex_cwd}")
 
-        # MCP servers configured globally in ~/.codex/config.toml
+        mcp_config = os.path.join(self.codex_cwd, ".mcp.json")
+        if os.path.exists(mcp_config):
+            logger.info(f"MCP project config found: {mcp_config}")
+        else:
+            logger.warning(f"MCP project config not found: {mcp_config}")
 
         cmd = [CODEX_COMMAND, "app-server"]
         logger.info(f"Spawning: {' '.join(cmd)}")
-        self.process = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        self.process = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=self.codex_cwd, env=self._build_process_env())
         self._read_task = asyncio.create_task(self._read_stdout())
-        asyncio.create_task(self._read_stderr())
+        self._stderr_task = asyncio.create_task(self._read_stderr())
         await self._send_request("initialize", {"clientInfo": {"name": "ky_platform_local_agent", "title": "KY Platform Local Agent", "version": "0.1.0"}, "capabilities": {"experimentalApi": True}})
         await self._send_notification("initialized", {})
-        result = await self._send_request("thread/start", {"cwd": self.workspace_dir, "approvalPolicy": "never", "sandboxPolicy": {"type": "dangerFullAccess"}})
+        result = await self._send_request("thread/start", {"cwd": self.codex_cwd, "approvalPolicy": "never", "sandboxPolicy": {"type": "dangerFullAccess"}})
         if isinstance(result, dict):
             thread_obj = result.get("thread", {})
             self.thread_id = thread_obj.get("id", "") or result.get("id", "") or result.get("threadId", "")
@@ -61,7 +72,33 @@ class CodexProcess:
             "回复简洁，Markdown 格式。\n\n"
         )
         text = system_prompt + text
-        await self._send_request("turn/start", {"threadId": self.thread_id, "input": [{"type": "text", "text": text}], "cwd": self.workspace_dir, "approvalPolicy": "never", "sandboxPolicy": {"type": "dangerFullAccess"}, "thinkingBudget": 4000})
+        await self._send_request("turn/start", {"threadId": self.thread_id, "input": [{"type": "text", "text": text}], "cwd": self.codex_cwd, "approvalPolicy": "never", "sandboxPolicy": {"type": "dangerFullAccess"}, "thinkingBudget": 4000})
+
+    def _build_process_env(self) -> dict:
+        env = os.environ.copy()
+        extra_path_dirs = []
+
+        rg_path = os.getenv("CODEX_AGENT_RG_PATH") or shutil.which("rg") or shutil.which("rg.exe")
+        if rg_path:
+            rg_dir = os.path.dirname(os.path.abspath(rg_path))
+            if rg_dir:
+                extra_path_dirs.append(rg_dir)
+                logger.info(f"Using rg from: {rg_path}")
+        else:
+            logger.warning("rg not found in current PATH; Codex search commands may fail.")
+
+        codex_path = shutil.which(CODEX_COMMAND)
+        if codex_path:
+            codex_dir = os.path.dirname(os.path.abspath(codex_path))
+            if codex_dir:
+                extra_path_dirs.append(codex_dir)
+
+        if extra_path_dirs:
+            current_path = env.get("PATH", "")
+            env["PATH"] = os.pathsep.join(dict.fromkeys(extra_path_dirs + current_path.split(os.pathsep)))
+
+        env.setdefault("CODEX_WORKSPACE", self.codex_cwd)
+        return env
 
     async def _read_stdout(self):
         try:
@@ -133,8 +170,15 @@ class CodexProcess:
                 self._current_assistant_text += delta_text
             return
 
-        # item/reasoning/summaryTextDelta: accumulate reasoning text
-        if method == "item/reasoning/summaryTextDelta":
+        # Reasoning deltas can arrive with several method names across Codex builds.
+        if method in (
+            "item/reasoning/summaryTextDelta",
+            "item/reasoning/delta",
+            "item/reasoning/textDelta",
+            "item/reasoning/summaryDelta",
+            "codex/event/reasoning_delta",
+            "codex/event/reasoning_summary_delta",
+        ):
             delta_text = self._extract_delta_text(params)
             if delta_text:
                 self._current_reasoning_text += delta_text
@@ -189,6 +233,12 @@ class CodexProcess:
                 logger.error(f"[MCP_SERVER] {server_name} status={status} error={error}")
             else:
                 logger.info(f"[MCP_SERVER] {server_name} status={status}")
+            await self._codex_events.put({
+                "type": "mcp_status",
+                "server": server_name,
+                "status": status,
+                "error": error,
+            })
         elif method == "codex/event/mcp_tool_call_begin":
             tool_name = params.get("toolName", "") or params.get("name", "")
             if not tool_name:
@@ -200,6 +250,19 @@ class CodexProcess:
                 if tool_name:
                     tool_input = invocation.get("arguments", {})
                     logger.info(f"[MCP] {server}/{tool_name}({json.dumps(tool_input, ensure_ascii=False)[:200]})")
+                    await self._codex_events.put({
+                        "type": "tool_call",
+                        "server": server,
+                        "tool": tool_name,
+                    })
+        elif method == "item/commandExecution/outputDelta":
+            delta_text = self._extract_delta_text(params)
+            if delta_text:
+                logger.info(f"[COMMAND_OUTPUT] {delta_text[:300]}")
+                await self._codex_events.put({
+                    "type": "tool_output_chunk",
+                    "text": delta_text,
+                })
 
         else:
             # Catch-all for unhandled events to discover new method names
@@ -295,8 +358,11 @@ class CodexProcess:
     async def close(self):
         logger.info("Closing codex process...")
         if self._read_task: self._read_task.cancel()
+        if self._stderr_task: self._stderr_task.cancel()
         if self.process:
             try:
+                if self.process.stdin:
+                    self.process.stdin.close()
                 self.process.terminate()
                 try: await asyncio.wait_for(self.process.wait(), timeout=5)
                 except asyncio.TimeoutError: self.process.kill(); await self.process.wait()

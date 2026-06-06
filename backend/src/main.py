@@ -25,7 +25,7 @@ async def lifespan(_app: FastAPI):
     banner = f"""
   +---------------------------------------------------+
   |   考研AI助手 . 后端节点 v3.2 (Python)              |
-  |   MinerU解析 / 任务队列 / 学习中心中继 / 题库系统   |
+  |   MinerU解析 / 资源库任务 / 学习中心中继 / 资源库题库 |
   +---------------------------------------------------+
   |   PORT     : {str(settings.port).ljust(42)}|
   |   MODEL    : {settings.embedding_model.ljust(42)}|
@@ -96,6 +96,8 @@ async def cors_safe_exception_handler(request: Request, exc: Exception):
 @app.middleware("http")
 async def authenticate_user(request: Request, call_next):
     request.state.user_id = ""
+    if request.method == "OPTIONS":
+        return await call_next(request)
     if path_requires_auth(request.url.path):
         token = get_bearer_token(request)
         request.state.user_id = verify_supabase_token(token)
@@ -105,6 +107,6 @@ async def authenticate_user(request: Request, call_next):
 
 app.include_router(health_router)
 app.include_router(learning_router)
-app.include_router(task_queue_router)   # /api/tasks/queue 必须在前，避免被 /api/tasks/{task_id} 拦截
+app.include_router(task_queue_router)   # /api/resources/tasks 必须在前，避免被 /api/tasks/{task_id} 类参数路由拦截
 app.include_router(task_router)
 app.include_router(question_bank_router)

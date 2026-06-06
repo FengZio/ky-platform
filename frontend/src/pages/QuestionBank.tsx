@@ -1,9 +1,11 @@
 import { useState, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { supabase } from "@/lib/supabase";
 import { backendFetch } from "@/lib/backend";
 import { QuestionBankItem, Subject, Plan, PlanPhase } from "@/types";
 import { cn } from "@/lib/utils";
+import { katexOptions, normalizeMarkdownMath } from "@/lib/markdown";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -13,16 +15,6 @@ import {
   ListPlus, BookOpen, CheckCircle2, X, Brain, Pencil,
   Star, Loader2,
 } from "lucide-react";
-
-// ---- Markdown preprocessor ----
-function preprocessMarkdown(text: string): string {
-  let result = text;
-  // Ensure blank line before table blocks
-  result = result.replace(/([^\n])\n(\|[^\n]+\|\n\|[:\- ]+\|)/g, "$1\n\n$2");
-  // Fix alignment rows missing trailing pipe
-  result = result.replace(/^(\|[ :\-]+\|[ :\-]+):$/gm, "$1|");
-  return result;
-}
 
 const TYPE_LABELS: Record<string, string> = {
   choice: "选择题", short_answer: "简答题", calculation: "计算题",
@@ -41,6 +33,42 @@ const SOURCE_LABELS: Record<string, string> = {
   ai_generated: "AI 生成", manual: "手动录入",
 };
 
+interface TaskCacheItem {
+  id: string;
+  task_type: "pdf_export" | "doc_parse";
+  status: "queued" | "processing" | "done" | "failed";
+  progress_pct: number;
+  message: string | null;
+  payload_json: Record<string, unknown>;
+  result_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+function cacheQueuedPdfTask(
+  queryClient: ReturnType<typeof useQueryClient>,
+  taskId: string,
+  questionIds: string[],
+) {
+  const now = new Date().toISOString();
+  const queuedTask: TaskCacheItem = {
+    id: taskId,
+    task_type: "pdf_export",
+    status: "queued",
+    progress_pct: 0,
+    message: "PDF 导出任务已提交",
+    payload_json: { question_ids: questionIds },
+    result_json: {},
+    created_at: now,
+    updated_at: now,
+  };
+
+  queryClient.setQueryData<TaskCacheItem[]>(["task-queue"], (current = []) => [
+    queuedTask,
+    ...current.filter((task) => task.id !== taskId),
+  ]);
+}
+
 function safeOptions(opts: QuestionBankItem["options"]): { label: string; text: string }[] {
   if (!opts) return [];
   if (typeof opts === "string") {
@@ -51,6 +79,7 @@ function safeOptions(opts: QuestionBankItem["options"]): { label: string; text: 
 
 export default function QuestionBank({ embedded = false }: { embedded?: boolean }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState("");
   const [filterDifficulty, setFilterDifficulty] = useState(0);
@@ -71,7 +100,7 @@ export default function QuestionBank({ embedded = false }: { embedded?: boolean 
       if (filterSource) params.set("source", filterSource);
       params.set("limit", "200");
 
-      const res = await backendFetch(`/api/questions?${params}`);
+      const res = await backendFetch(`/api/resources/questions?${params}`);
       if (res.status === 401) return [];
       const json = await res.json();
       return (json.questions || []) as QuestionBankItem[];
@@ -88,7 +117,7 @@ export default function QuestionBank({ embedded = false }: { embedded?: boolean 
 
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => {
-      await backendFetch(`/api/questions/${id}`, {
+      await backendFetch(`/api/resources/questions/${id}`, {
         method: "DELETE",
       });
     },
@@ -97,7 +126,7 @@ export default function QuestionBank({ embedded = false }: { embedded?: boolean 
 
   const toPlanMutation = useMutation({
     mutationFn: async (questionId: string) => {
-      const res = await backendFetch("/api/questions/to-plan", {
+      const res = await backendFetch("/api/resources/questions/to-plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question_id: questionId, plan_id: selectedPlan, phase_id: selectedPhase || undefined }),
@@ -141,13 +170,18 @@ export default function QuestionBank({ embedded = false }: { embedded?: boolean 
     setExporting(true);
     try {
       const ids = selected.size > 0 ? Array.from(selected) : (filtered || []).map((q) => q.id);
-      const res = await backendFetch("/api/tasks/queue/pdf-export", {
+      const res = await backendFetch("/api/resources/tasks/pdf-export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question_ids: ids }),
       });
       if (res.ok) {
-        alert("PDF 导出任务已提交，请在「任务队列」页面查看进度和下载。");
+        const json = await res.json();
+        if (json.task_id) {
+          cacheQueuedPdfTask(queryClient, json.task_id, ids);
+        }
+        queryClient.invalidateQueries({ queryKey: ["task-queue"] });
+        navigate("/resources?tab=tasks");
       } else {
         const json = await res.json().catch(() => ({}));
         alert("导出失败: " + (json.detail || res.status));
@@ -267,8 +301,8 @@ export default function QuestionBank({ embedded = false }: { embedded?: boolean 
                       </div>
                       <div className="prose prose-sm dark:prose-invert max-w-none text-sm cursor-pointer"
                         onClick={() => toggleExpand(q.id)}>
-                        <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                          {q.content.length > 120 && !isExpanded ? q.content.slice(0, 120) + "..." : q.content}
+                        <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[[rehypeKatex, katexOptions]]}>
+                          {normalizeMarkdownMath(q.content.length > 120 && !isExpanded ? q.content.slice(0, 120) + "..." : q.content)}
                         </ReactMarkdown>
                       </div>
 
@@ -289,16 +323,16 @@ export default function QuestionBank({ embedded = false }: { embedded?: boolean 
                           {q.answer && (
                             <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg border-l-3 border-emerald-400 text-sm">
                               <span className="font-semibold text-emerald-700 dark:text-emerald-400">答案：</span>
-                              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                                {q.answer}
+                              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[[rehypeKatex, katexOptions]]}>
+                                {normalizeMarkdownMath(q.answer)}
                               </ReactMarkdown>
                             </div>
                           )}
                           {q.explanation && (
                             <div className="p-3 bg-amber-50 dark:bg-amber-950/30 rounded-lg border-l-3 border-amber-400 text-sm">
                               <span className="font-semibold text-amber-700 dark:text-amber-400">解析：</span>
-                              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                                {q.explanation}
+                              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[[rehypeKatex, katexOptions]]}>
+                                {normalizeMarkdownMath(q.explanation)}
                               </ReactMarkdown>
                             </div>
                           )}

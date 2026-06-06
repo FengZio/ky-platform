@@ -3,9 +3,6 @@
 WebSocket:
   GET /api/learning/ws          Browser side (generates pairing code)
   GET /api/learning/agent/ws    Agent side (consumes pairing code)
-
-REST:
-  GET /api/learning/questions   Question bank docs
 """
 
 import json
@@ -165,15 +162,3 @@ async def get_context(req: ContextRequest):
     except Exception as e:
         logger.error(f"Context search error: {e}")
         return {"context": "", "status": "error", "message": str(e)}
-
-@router.get("/questions")
-async def get_questions(
-    subject_id: str = Query(default=""),
-    limit: int = Query(default=10, ge=1, le=50),
-    difficulty: int = Query(default=0, ge=0, le=5),
-):
-    return {
-        "questions": [],
-        "note": "Frontend queries knowledge_points via supabase-js directly",
-        "query_params": {"subject_id": subject_id, "limit": limit, "difficulty": difficulty},
-    }

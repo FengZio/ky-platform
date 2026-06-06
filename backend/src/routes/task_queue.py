@@ -1,4 +1,4 @@
-"""Task Queue Routes --- 通用任务队列 (PDF 导出 + 资料解析)"""
+"""Resources Task Routes --- 资源库任务 (PDF 导出 + 资料解析)"""
 
 import asyncio
 import json
@@ -15,7 +15,7 @@ from src.services.supabase import get_admin
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/tasks/queue", tags=["task_queue"])
+router = APIRouter(prefix="/api/resources/tasks", tags=["resources_tasks"])
 
 
 # ============================================================
@@ -74,7 +74,7 @@ def _update_task(task_id: str, **kwargs):
 
 @router.get("")
 async def list_tasks(req: Request, limit: int = Query(default=20, ge=1, le=50)):
-    """列出用户的任务队列"""
+    """列出资源库中的任务列表"""
     user = getattr(req.state, "user_id", None)
     if not user:
         raise HTTPException(status_code=401)
@@ -182,7 +182,7 @@ async def submit_pdf_export(req: Request, body: PdfExportSubmit):
     # 启动后台处理
     asyncio.create_task(_process_pdf_export(task["id"], user, body.question_ids))
 
-    return {"status": "queued", "task_id": task["id"], "message": "PDF 导出任务已提交，稍后在任务队列中下载"}
+    return {"status": "queued", "task_id": task["id"], "message": "PDF 导出任务已提交，稍后可在资源库的任务页签中下载"}
 
 
 # ============================================================

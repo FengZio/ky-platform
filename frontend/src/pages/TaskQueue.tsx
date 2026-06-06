@@ -39,7 +39,7 @@ export default function TaskQueue({ embedded = false }: { embedded?: boolean }) 
   const { data: tasks, isLoading, refetch } = useQuery({
     queryKey: ["task-queue"],
     queryFn: async () => {
-      const res = await backendFetch("/api/tasks/queue?limit=30");
+      const res = await backendFetch("/api/resources/tasks?limit=30");
       if (res.status === 401) return [];
       return ((await res.json()).tasks || []) as TaskItem[];
     },
@@ -49,7 +49,7 @@ export default function TaskQueue({ embedded = false }: { embedded?: boolean }) 
   const handleDownload = async (task: TaskItem) => {
     setDownloading(task.id);
     try {
-      const res = await backendFetch(`/api/tasks/queue/${task.id}/download`);
+      const res = await backendFetch(`/api/resources/tasks/${task.id}/download`);
       if (res.ok) {
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
