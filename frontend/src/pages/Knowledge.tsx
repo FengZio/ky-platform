@@ -16,7 +16,7 @@ import {
   Search, FileJson,
 } from "lucide-react";
 
-export default function Knowledge() {
+export default function Knowledge({ embedded = false }: { embedded?: boolean }) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [selectedSubject, setSelectedSubject] = useState<string>("all");
@@ -36,7 +36,7 @@ export default function Knowledge() {
   const { data: points, isLoading } = useQuery({
     queryKey: ["knowledge-points", selectedSubject],
     queryFn: async () => {
-      let query = supabase.from("knowledge_points").select("*").order("sort_order");
+      let query = supabase.from("knowledge_points").select("id,subject_id,parent_id,material_id,name,description,difficulty,importance,sort_order,is_mastered,mastered_at,created_at,updated_at").order("sort_order");
       if (selectedSubject !== "all") {
         query = query.eq("subject_id", selectedSubject);
       }
@@ -69,9 +69,13 @@ export default function Knowledge() {
   const mastered = points?.filter((p) => p.is_mastered).length ?? 0;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className={embedded ? "space-y-6" : "max-w-4xl mx-auto space-y-6"}>
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">知识体系</h1>
+        {embedded ? (
+          <h2 className="text-lg font-semibold">知识体系</h2>
+        ) : (
+          <h1 className="text-2xl font-bold">知识体系</h1>
+        )}
         <button
           onClick={() => {
             setParentId(null);

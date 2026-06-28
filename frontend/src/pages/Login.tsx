@@ -28,7 +28,7 @@ export default function Login() {
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <GraduationCap className="w-12 h-12 text-primary-600 mx-auto mb-3" />
-          <h1 className="text-2xl font-bold">考研AI助手</h1>
+          <h1 className="text-2xl font-bold">考上鸭</h1>
           <p className="text-sm text-gray-400 mt-1">个人AI学习辅助工具</p>
         </div>
 

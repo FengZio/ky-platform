@@ -1,16 +1,17 @@
 import { createContext, useContext, useState, useRef, useCallback, useEffect, ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
+import { getBackendWsUrl } from "@/lib/backend";
 
 // ---- Types ----
 export type ChatMessage = {
   role: "user" | "assistant" | "system";
   content: string;
   isStreaming?: boolean;
+  reasoning?: string;
+  responseState?: "thinking" | "replying" | "completed";
 };
 
 export type ContextItem = { id: string; name: string; type: "kp" | "material" };
-
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "https://vq.zrj666.cn";
 
 // Heartbeat: client sends ping every 30s to keep connection alive through proxies
 const HEARTBEAT_MS = 30_000;
@@ -23,6 +24,7 @@ interface LearningWsState {
   input: string;
   agentConnected: boolean;
   turnActive: boolean;
+  debugMode: boolean;
   pairingCode: string;
   conversationId: string;
   selectedKps: ContextItem[];
@@ -30,6 +32,7 @@ interface LearningWsState {
   setInput: (v: string) => void;
   setConversationId: (v: string) => void;
   setMessages: (v: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => void;
+  setDebugMode: (v: boolean) => void;
   toggleKp: (kp: { id: string; name: string }) => void;
   toggleMaterial: (m: { id: string; title: string }) => void;
   removeContext: (item: ContextItem) => void;
@@ -47,6 +50,7 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
   const [input, setInput] = useState("");
   const [agentConnected, setAgentConnected] = useState(false);
   const [turnActive, setTurnActive] = useState(false);
+  const [debugMode, setDebugMode] = useState(false);
   const [pairingCode, setPairingCode] = useState("");
   const [conversationId, setConversationId] = useState("");
   const [selectedKps, setSelectedKps] = useState<ContextItem[]>([]);
@@ -56,6 +60,11 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectAttempt = useRef(0);
+  const debugModeRef = useRef(debugMode);
+
+  useEffect(() => {
+    debugModeRef.current = debugMode;
+  }, [debugMode]);
 
   // ---- Client heartbeat: ping every 30s ----
   const startHeartbeat = useCallback((ws: WebSocket) => {
@@ -75,7 +84,7 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // ---- WebSocket connection (persistent) ----
-  const connectWs = useCallback(() => {
+  const connectWs = useCallback(async () => {
     if (reconnectTimer.current) {
       clearTimeout(reconnectTimer.current);
       reconnectTimer.current = null;
@@ -85,9 +94,7 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
       try { wsRef.current.close(); } catch {}
     }
 
-    const protocol = BACKEND_URL.startsWith("https") ? "wss" : "ws";
-    const host = BACKEND_URL.replace(/^https?:\/\//, "");
-    const url = protocol + "://" + host + "/api/learning/ws";
+    const url = await getBackendWsUrl("/api/learning/ws");
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
@@ -102,6 +109,10 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
           case "pairing_code":
             setPairingCode(msg.code);
             break;
+          case "error":
+            setTurnActive(false);
+            setMessages((prev) => [...prev, { role: "system", content: msg.text || "连接失败，请重新登录后再试。" }]);
+            break;
           case "agent_connected":
             setAgentConnected(true);
             reconnectAttempt.current = 0;
@@ -110,26 +121,102 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
           case "agent_disconnected":
             setAgentConnected(false);
             setTurnActive(false);
+            setMessages((prev) => [...prev, {
+              role: "system",
+              content: msg.text || "本地 Codex Agent 已断开。请复制配对码，在电脑上运行 local_agent.py 并输入该配对码重新连接。",
+            }]);
             break;
-          case "assistant_chunk":
+          case "turn_started":
             setTurnActive(true);
+            setMessages((prev) => [...prev, {
+              role: "assistant",
+              content: "",
+              isStreaming: true,
+              responseState: "thinking",
+            }]);
+            break;
+          case "reasoning_chunk":
             setMessages((prev) => {
               const last = prev[prev.length - 1];
               if (last?.role === "assistant" && last.isStreaming) {
                 const updated = [...prev];
-                updated[updated.length - 1] = { ...last, content: last.content + msg.text };
+                updated[updated.length - 1] = {
+                  ...last,
+                  responseState: "thinking",
+                  reasoning: (last.reasoning || "") + msg.text,
+                };
                 return updated;
               }
-              return [...prev, { role: "assistant", content: msg.text, isStreaming: true }];
+              return [...prev, {
+                role: "assistant",
+                content: "",
+                isStreaming: true,
+                responseState: "thinking",
+                reasoning: msg.text,
+              }];
             });
+            break;
+          case "reasoning_end":
+            // reasoning complete - no action needed, already accumulated
+            break;
+          case "mcp_status": {
+            const server = msg.server || "MCP";
+            const status = msg.status || "unknown";
+            const content = msg.error
+              ? `${server} 连接失败：${msg.error}`
+              : `${server} 状态：${status}`;
+            setMessages((prev) => [...prev, { role: "system", content }]);
+            break;
+          }
+          case "tool_call": {
+            const tool = msg.tool ? `${msg.server || "MCP"}/${msg.tool}` : "MCP 工具";
+            setMessages((prev) => [...prev, { role: "system", content: `正在调用 ${tool}...` }]);
+            break;
+          }
+          case "tool_output_chunk":
+            // Tool output is logged by the agent; keeping it out of chat avoids noisy transcripts.
+            break;
+          case "assistant_chunk":
+            setTurnActive(true);
+            setMessages((prev) => {
+              const streamingIndex = [...prev].reverse().findIndex((item) => item.role === "assistant" && item.isStreaming);
+              if (streamingIndex >= 0) {
+                const targetIndex = prev.length - 1 - streamingIndex;
+                const target = prev[targetIndex];
+                const updated = [...prev];
+                updated[targetIndex] = {
+                  ...target,
+                  content: target.content + msg.text,
+                  responseState: "replying",
+                };
+                return updated;
+              }
+              return [...prev, { role: "assistant", content: msg.text, isStreaming: true, responseState: "replying" }];
+            });
+            break;
+          case "codex_debug":
+            if (debugModeRef.current) {
+              setMessages((prev) => [...prev, {
+                role: "system",
+                content: [
+                  msg.label || "Codex 调试事件",
+                  `method: ${msg.method || "unknown"}`,
+                  msg.item_type ? `item_type: ${msg.item_type}` : "",
+                  msg.tool ? `tool: ${msg.server || "MCP"}/${msg.tool}` : "",
+                  msg.summary ? `summary: ${msg.summary}` : "",
+                ].filter(Boolean).join("\n"),
+              }]);
+            }
             break;
           case "turn_completed":
             setTurnActive(false);
             setMessages((prev) => {
               const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last?.isStreaming) {
-                updated[updated.length - 1] = { ...last, isStreaming: false };
+              const streamingIndex = [...updated].reverse().findIndex((item) => item.role === "assistant" && item.isStreaming);
+              if (streamingIndex >= 0) {
+                const targetIndex = updated.length - 1 - streamingIndex;
+                const target = updated[targetIndex];
+                updated[targetIndex] = { ...target, isStreaming: false, responseState: "completed" };
               }
               return updated;
             });
@@ -238,8 +325,10 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
   return (
     <LearningWsContext.Provider value={{
       messages, input, agentConnected, turnActive, pairingCode,
+      debugMode,
       conversationId, selectedKps, selectedMaterials,
       setInput, setConversationId, setMessages,
+      setDebugMode,
       toggleKp, toggleMaterial, removeContext,
       handleSend, handleQuickAsk, newConversation,
     }}>

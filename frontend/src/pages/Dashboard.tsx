@@ -2,18 +2,31 @@ import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
-import { DailyGoal, DailyGoalItem, ExamInfo, Plan, Subject } from "@/types";
+import { OverviewStatistics } from "@/components/OverviewStatistics";
+import { WorkspacePageShell } from "@/components/WorkspacePageShell";
+import {
+  EmptyStatePanel,
+  InsightCard,
+  LinearProgress,
+  MetricCard,
+  PrimaryButton,
+  SectionHeader,
+  StatusChip,
+  WorkbenchCard,
+  WorkbenchInput,
+} from "@/components/workbench";
+import { DailyGoal, DailyGoalItem, ExamInfo, Plan } from "@/types";
 import { daysUntil, formatDate, cn } from "@/lib/utils";
 import {
-  CalendarDays, Target, TrendingUp, CheckCircle2, Clock, BookOpen,
-  Plus, Trash2, Play, Square, RefreshCw, Pencil, Smile, Frown, Meh,
+  CalendarDays, Target, TrendingUp, CheckCircle2, BookOpen,
+  Plus, Trash2, Play, Square, RefreshCw, Pencil, Smile, Frown, Meh, Brain,
 } from "lucide-react";
 
 const TODAY = new Date().toISOString().slice(0, 10);
+type TodayGoal = DailyGoal & { items: DailyGoalItem[] };
 
 export default function Dashboard() {
   const { user } = useAuth();
-  const queryClient = useQueryClient();
 
   const { data: exams } = useQuery({
     queryKey: ["exams"],
@@ -35,7 +48,7 @@ export default function Dashboard() {
   const { data: todayGoal, isLoading: goalLoading } = useQuery({
     queryKey: ["today-goal"],
     queryFn: async () => {
-      const { data: goal } = await supabase.from("daily_goals").select("*").eq("date", TODAY).single();
+      const { data: goal } = await supabase.from("daily_goals").select("*").eq("date", TODAY).maybeSingle();
       if (goal) {
         const { data: items } = await supabase
           .from("daily_goal_items").select("*").eq("daily_goal_id", goal.id).order("sort_order");
@@ -56,75 +69,106 @@ export default function Dashboard() {
   const completionRate = totalItems > 0 ? completedItems / totalItems : 0;
 
   const statCards = [
-    { label: "距离考试", value: daysLeft !== null ? `${daysLeft} 天` : "未设置", icon: CalendarDays, color: "text-blue-600", bg: "bg-blue-50 dark:bg-blue-950" },
-    { label: "活跃计划", value: `${activePlans?.length ?? 0} 个`, icon: Target, color: "text-emerald-600", bg: "bg-emerald-50 dark:bg-emerald-950" },
-    { label: "今日进度", value: `${completedItems}/${totalItems}`, icon: CheckCircle2, color: "text-violet-600", bg: "bg-violet-50 dark:bg-violet-950" },
-    { label: "完成率", value: totalItems > 0 ? `${Math.round(completionRate * 100)}%` : "-", icon: TrendingUp, color: "text-amber-600", bg: "bg-amber-50 dark:bg-amber-950" },
+    {
+      label: "距离考试",
+      value: daysLeft !== null ? `${daysLeft} 天` : "未设置",
+      hint: nextExam ? nextExam.name : "设置考试信息后显示倒计时",
+      icon: <CalendarDays className="h-5 w-5" />,
+      tone: "primary" as const,
+    },
+    {
+      label: "活跃计划",
+      value: `${activePlans?.length ?? 0} 个`,
+      hint: activePlans?.[0]?.name ?? "当前没有进行中的长计划",
+      icon: <Target className="h-5 w-5" />,
+      tone: "success" as const,
+    },
+    {
+      label: "今日进度",
+      value: `${completedItems}/${totalItems}`,
+      hint: totalItems > 0 ? `已完成 ${completedItems} 项任务` : "今天先列出一组学习目标",
+      icon: <CheckCircle2 className="h-5 w-5" />,
+      tone: "secondary" as const,
+    },
+    {
+      label: "完成率",
+      value: totalItems > 0 ? `${Math.round(completionRate * 100)}%` : "-",
+      hint: totalItems > 0 ? "根据今日目标实时更新" : "开始任务后自动计算",
+      icon: <TrendingUp className="h-5 w-5" />,
+      tone: "warning" as const,
+    },
   ];
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
-      <h1 className="text-2xl font-bold">仪表盘</h1>
-
-      {/* Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {statCards.map(({ label, value, icon: Icon, color, bg }) => (
-          <div key={label} className={`${bg} rounded-xl p-4`}>
-            <Icon className={`w-5 h-5 ${color} mb-2`} />
-            <p className="text-2xl font-bold">{value}</p>
-            <p className="text-sm text-gray-500 dark:text-gray-400">{label}</p>
-          </div>
+    <WorkspacePageShell
+      title="总览"
+      description="查看今日任务、复习节奏和近期学习趋势。"
+      contentClassName="space-y-6"
+    >
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {statCards.map(({ label, value, hint, icon, tone }) => (
+          <MetricCard key={label} label={label} value={value} hint={hint} icon={icon} tone={tone} />
         ))}
       </div>
 
-      <div className="grid lg:grid-cols-2 gap-6">
-        {/* Daily Goals */}
-        <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5">
-          <h2 className="font-semibold text-lg mb-4 flex items-center gap-2">
-            <Clock className="w-5 h-5 text-primary-500" />
-            今日目标 ({TODAY})
-          </h2>
+      <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+        <WorkbenchCard className="space-y-4">
+          <SectionHeader
+            title="今日目标"
+            description={`按任务、番茄钟和复盘追踪今天的学习节奏 · ${TODAY}`}
+            action={<StatusChip tone="info">{Math.round(completionRate * 100)}% 完成</StatusChip>}
+          />
           {goalLoading ? (
-            <p className="text-gray-400 text-sm">加载中...</p>
+            <div className="py-12 text-center text-sm text-foreground-muted">加载中...</div>
           ) : todayGoal ? (
             <DailyGoalPanel goal={todayGoal} items={items} />
           ) : null}
-        </div>
+        </WorkbenchCard>
 
-        {/* Active Plans */}
-        <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5">
-          <h2 className="font-semibold text-lg mb-4 flex items-center gap-2">
-            <BookOpen className="w-5 h-5 text-primary-500" />
-            活跃计划
-          </h2>
+        <InsightCard
+          title="活跃计划"
+          action={<StatusChip tone={activePlans && activePlans.length > 0 ? "success" : "neutral"}>{activePlans?.length ?? 0} 个进行中</StatusChip>}
+        >
           {activePlans && activePlans.length > 0 ? (
-            <ul className="space-y-3">
+            <div className="space-y-4">
               {activePlans.map((plan) => {
-                const progress = Math.min(100, Math.max(0,
-                  ((Date.now() - new Date(plan.start_date).getTime()) /
-                    (new Date(plan.end_date).getTime() - new Date(plan.start_date).getTime())) * 100
-                ));
+                const progress = Math.min(
+                  100,
+                  Math.max(
+                    0,
+                    ((Date.now() - new Date(plan.start_date).getTime()) /
+                      (new Date(plan.end_date).getTime() - new Date(plan.start_date).getTime())) *
+                      100,
+                  ),
+                );
                 return (
-                  <li key={plan.id} className="p-3 rounded-lg bg-gray-50 dark:bg-gray-800">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-sm">{plan.name}</span>
-                      <span className="text-xs text-gray-400">
-                        {formatDate(plan.start_date)} → {formatDate(plan.end_date)}
-                      </span>
+                  <div key={plan.id} className="rounded-lg border border-outline-variant/70 bg-surface-low p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <h3 className="text-sm font-semibold text-foreground">{plan.name}</h3>
+                        <p className="text-xs text-foreground-muted">
+                          {formatDate(plan.start_date)} - {formatDate(plan.end_date)}
+                        </p>
+                      </div>
+                      <StatusChip tone="info">{Math.round(progress)}%</StatusChip>
                     </div>
-                    <div className="mt-2 w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5">
-                      <div className="bg-primary-500 h-1.5 rounded-full" style={{ width: `${progress}%` }} />
-                    </div>
-                  </li>
+                    <LinearProgress value={progress} className="mt-3" />
+                  </div>
                 );
               })}
-            </ul>
+            </div>
           ) : (
-            <p className="text-gray-400 text-sm py-8 text-center">暂无活跃计划</p>
+            <EmptyStatePanel
+              icon={<BookOpen className="h-5 w-5" />}
+              title="暂无活跃计划"
+              description="去计划页创建一条长期学习路径，这里会自动呈现进度。"
+            />
           )}
-        </div>
+        </InsightCard>
       </div>
-    </div>
+
+      <OverviewStatistics />
+    </WorkspacePageShell>
   );
 }
 
@@ -139,19 +183,63 @@ function DailyGoalPanel({ goal, items }: { goal: DailyGoal; items: DailyGoalItem
   const [reflectionText, setReflectionText] = useState(goal.reflection ?? "");
 
   const addItem = useMutation({
-    mutationFn: async () => {
-      const { error } = await supabase.from("daily_goal_items").insert({
+    mutationFn: async ({ title, minutes }: { title: string; minutes: number }) => {
+      const { data, error } = await supabase.from("daily_goal_items").insert({
         daily_goal_id: goal.id,
-        title: newTitle,
-        estimated_minutes: newMinutes,
+        title,
+        estimated_minutes: minutes,
         sort_order: items.length,
-      });
+      }).select().single();
       if (error) throw error;
+      return data as DailyGoalItem;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["today-goal"] });
+    onMutate: async ({ title, minutes }) => {
+      await queryClient.cancelQueries({ queryKey: ["today-goal"] });
+      const previousGoal = queryClient.getQueryData<TodayGoal>(["today-goal"]);
+      const now = new Date().toISOString();
+      const optimisticItem: DailyGoalItem = {
+        id: `temp-${Date.now()}`,
+        daily_goal_id: goal.id,
+        knowledge_point_id: null,
+        material_id: null,
+        question_id: null,
+        title,
+        description: null,
+        estimated_minutes: minutes,
+        actual_minutes: null,
+        status: "pending",
+        sort_order: previousGoal?.items.length ?? items.length,
+        completed_at: null,
+        created_at: now,
+        updated_at: now,
+      };
+
+      queryClient.setQueryData<TodayGoal>(["today-goal"], (current) =>
+        current ? { ...current, items: [...current.items, optimisticItem] } : current,
+      );
       setNewTitle("");
       setNewMinutes(30);
+      return { previousGoal, optimisticId: optimisticItem.id };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previousGoal) {
+        queryClient.setQueryData(["today-goal"], context.previousGoal);
+      }
+    },
+    onSuccess: (created, _variables, context) => {
+      queryClient.setQueryData<TodayGoal>(["today-goal"], (current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.map((item) =>
+                item.id === context?.optimisticId ? created : item,
+              ),
+            }
+          : current,
+      );
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["today-goal"] });
     },
   });
 
@@ -168,7 +256,20 @@ function DailyGoalPanel({ goal, items }: { goal: DailyGoal; items: DailyGoalItem
 
   const deleteItem = useMutation({
     mutationFn: async (id: string) => supabase.from("daily_goal_items").delete().eq("id", id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["today-goal"] }),
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey: ["today-goal"] });
+      const previousGoal = queryClient.getQueryData<TodayGoal>(["today-goal"]);
+      queryClient.setQueryData<TodayGoal>(["today-goal"], (current) =>
+        current ? { ...current, items: current.items.filter((item) => item.id !== id) } : current,
+      );
+      return { previousGoal };
+    },
+    onError: (_error, _id, context) => {
+      if (context?.previousGoal) {
+        queryClient.setQueryData(["today-goal"], context.previousGoal);
+      }
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["today-goal"] }),
   });
 
   const updateReflection = useMutation({
@@ -199,9 +300,8 @@ function DailyGoalPanel({ goal, items }: { goal: DailyGoal; items: DailyGoalItem
 
   return (
     <div className="space-y-4">
-      {/* Mood selector */}
-      <div className="flex items-center gap-2">
-        <span className="text-xs text-gray-400">今日心情:</span>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-foreground-muted">今日心情</span>
         {[
           { value: 1, icon: Frown, color: "text-red-400" },
           { value: 3, icon: Meh, color: "text-amber-400" },
@@ -210,93 +310,107 @@ function DailyGoalPanel({ goal, items }: { goal: DailyGoal; items: DailyGoalItem
           <button
             key={value}
             onClick={() => updateMood.mutate(value)}
-            className={cn("p-1 rounded transition-colors", goal.mood === value ? "bg-gray-100 dark:bg-gray-700" : "hover:bg-gray-50")}
+            className={cn(
+              "rounded-full border px-2.5 py-1.5 transition-colors",
+              goal.mood === value ? "border-primary/20 bg-primary/8" : "border-outline-variant/70 hover:bg-surface-low",
+            )}
           >
             <Icon className={cn("w-5 h-5", color)} />
           </button>
         ))}
       </div>
 
-      {/* Items */}
-      <ul className="space-y-2">
+      <ul className="space-y-3">
         {items.map((item) => (
           <li key={item.id} className={cn(
-            "flex items-center gap-3 p-3 rounded-lg transition-colors",
-            item.status === "completed" ? "bg-emerald-50/50 dark:bg-emerald-950/30" :
-            item.status === "in_progress" ? "bg-amber-50/50 dark:bg-amber-950/30" :
-            "bg-gray-50 dark:bg-gray-800"
+            "flex items-center gap-3 rounded-lg border p-4 transition-colors",
+            item.status === "completed" ? "border-success/10 bg-success/10" :
+            item.status === "in_progress" ? "border-secondary/30 bg-secondary/15" :
+            "border-outline-variant/70 bg-surface-low"
           )}>
             <button onClick={() => toggleStatus.mutate({ id: item.id, status: item.status })} className="flex-shrink-0">
               {item.status === "completed" ? (
-                <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                <CheckCircle2 className="w-5 h-5 text-success" />
               ) : item.status === "in_progress" ? (
-                <RefreshCw className="w-5 h-5 text-amber-500 animate-spin" />
+                <RefreshCw className="w-5 h-5 animate-spin text-warning" />
               ) : (
-                <div className="w-5 h-5 rounded-full border-2 border-gray-300" />
+                <div className="h-5 w-5 rounded-full border-2 border-outline-variant" />
               )}
             </button>
-            <span className={cn("flex-1 text-sm", item.status === "completed" && "line-through text-gray-400")}>
+            <div className="min-w-0 flex-1">
+              <span className={cn("block text-sm text-foreground", item.status === "completed" && "line-through text-foreground-muted")}>
               {item.title}
-            </span>
+              </span>
+              <div className="mt-1 flex items-center gap-2">
+                <StatusChip tone={item.status === "completed" ? "success" : item.status === "in_progress" ? "warning" : "neutral"}>
+                  {item.status === "completed" ? "已完成" : item.status === "in_progress" ? "进行中" : "待开始"}
+                </StatusChip>
+                {item.question_id && (
+                  <a href={"/questions"} className="text-xs text-primary hover:text-primary-700 flex items-center gap-0.5" title="查看题目详情">
+                    <Brain className="w-3 h-3" />
+                    关联题目
+                  </a>
+                )}
+              </div>
+            </div>
 
-            {/* Pomodoro timer for in-progress */}
             {item.status === "in_progress" && (
               <PomodoroTimer itemId={item.id} estimatedMinutes={item.estimated_minutes} />
             )}
 
-            <span className="text-xs text-gray-400 w-12 text-right">{item.estimated_minutes}min</span>
-            <button onClick={() => deleteItem.mutate(item.id)} className="text-gray-400 hover:text-red-500">
+            <span className="w-12 text-right text-xs text-foreground-muted">{item.estimated_minutes}min</span>
+            <button onClick={() => deleteItem.mutate(item.id)} className="text-foreground-muted hover:text-error">
               <Trash2 className="w-3.5 h-3.5" />
             </button>
           </li>
         ))}
       </ul>
 
-      {/* Add item */}
       <div className="flex gap-2">
-        <input
-          className="flex-1 px-3 py-2 rounded-lg border bg-gray-50 dark:bg-gray-800 text-sm"
+        <WorkbenchInput
+          className="flex-1"
           placeholder="添加任务..."
           value={newTitle}
           onChange={(e) => setNewTitle(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") addItem.mutate(); }}
+          onKeyDown={(e) => {
+            const title = newTitle.trim();
+            if (e.key === "Enter" && title) addItem.mutate({ title, minutes: newMinutes });
+          }}
         />
-        <input
+        <WorkbenchInput
           type="number"
-          className="w-16 px-2 py-2 rounded-lg border bg-gray-50 dark:bg-gray-800 text-sm text-center"
+          className="w-20 text-center"
           value={newMinutes}
           onChange={(e) => setNewMinutes(Number(e.target.value))}
           min={5} max={180} step={5}
         />
-        <button
+        <PrimaryButton
           disabled={!newTitle.trim()}
-          onClick={() => addItem.mutate()}
-          className="px-3 py-2 bg-primary-600 text-white rounded-lg text-sm hover:bg-primary-700 disabled:opacity-50 flex items-center gap-1"
+          onClick={() => addItem.mutate({ title: newTitle.trim(), minutes: newMinutes })}
         >
           <Plus className="w-4 h-4" />
-        </button>
+        </PrimaryButton>
       </div>
 
-      {/* Reflection */}
-      <div className="border-t pt-3 mt-2">
+      <div className="border-t border-outline-variant/70 pt-4">
         {editingReflection ? (
           <div className="space-y-2">
             <textarea
-              className="w-full px-3 py-2 rounded-lg border bg-gray-50 dark:bg-gray-800 text-sm"
+              className="workbench-textarea w-full"
               rows={3}
               placeholder="今日复盘..."
               value={reflectionText}
               onChange={(e) => setReflectionText(e.target.value)}
             />
             <div className="flex gap-2 justify-end">
-              <button onClick={() => setEditingReflection(false)} className="px-3 py-1 text-sm text-gray-500">取消</button>
-              <button onClick={() => updateReflection.mutate()} className="px-3 py-1 bg-primary-600 text-white rounded text-sm">保存</button>
+              <button onClick={() => setEditingReflection(false)} className="px-3 py-1 text-sm text-foreground-muted">取消</button>
+              <PrimaryButton onClick={() => updateReflection.mutate()} className="h-9 px-3">保存</PrimaryButton>
             </div>
           </div>
         ) : (
           <button
             onClick={() => { setReflectionText(goal.reflection ?? ""); setEditingReflection(true); }}
-            className="flex items-center gap-2 text-sm text-gray-400 hover:text-gray-600 w-full text-left"
+            className="flex w-full items-center gap-2 rounded-lg border border-dashed border-outline-variant/80 bg-surface-low px-3 py-3 text-left text-sm text-foreground-muted transition hover:bg-surface-base"
           >
             <Pencil className="w-3.5 h-3.5" />
             {goal.reflection || "写今日复盘..."}
@@ -349,14 +463,14 @@ function PomodoroTimer({ itemId, estimatedMinutes }: { itemId: string; estimated
 
   return (
     <div className="flex items-center gap-1.5 text-xs">
-      <span className={cn("font-mono w-10 text-right", running ? "text-amber-600" : "text-gray-400")}>
+      <span className={cn("w-10 text-right font-mono", running ? "text-warning" : "text-foreground-muted")}>
         {time}
       </span>
-      <button onClick={toggle} className="p-0.5 text-gray-400 hover:text-emerald-500">
+      <button onClick={toggle} className="p-0.5 text-foreground-muted hover:text-success">
         {running ? <Square className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
       </button>
       {seconds > 0 && (
-        <button onClick={finish} className="p-0.5 text-gray-400 hover:text-emerald-500" title="完成">
+        <button onClick={finish} className="p-0.5 text-foreground-muted hover:text-success" title="完成">
           <CheckCircle2 className="w-3.5 h-3.5" />
         </button>
       )}

@@ -99,6 +99,7 @@ export interface DailyGoalItem {
   daily_goal_id: string;
   knowledge_point_id: string | null;
   material_id: string | null;
+  question_id: string | null;
   title: string;
   description: string | null;
   estimated_minutes: number;
@@ -217,3 +218,31 @@ export interface ParseTask {
 }
 
 type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
+
+
+// ============================================================
+// 题库 (v3.2 新增)
+// ============================================================
+export interface QuestionBankItem {
+  id: string;
+  user_id: string;
+  content_hash: string;
+  parent_question_id: string | null;
+  plan_id: string | null;
+  phase_id: string | null;
+  knowledge_point_ids: string[];
+  material_id: string | null;
+  type: "choice" | "short_answer" | "calculation" | "essay" | "true_false";
+  difficulty: number;
+  content: string;
+  options: { label: string; text: string }[] | string;
+  answer: string;
+  explanation: string | null;
+  source: "ai_generated" | "manual";
+  source_conversation_id: string | null;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+}
+export type QuestionBankInsert = Omit<QuestionBankItem, "id" | "created_at" | "updated_at" | "content_hash">;
+export type QuestionBankUpdate = Partial<QuestionBankInsert>;

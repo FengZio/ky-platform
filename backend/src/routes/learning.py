@@ -3,17 +3,15 @@
 WebSocket:
   GET /api/learning/ws          Browser side (generates pairing code)
   GET /api/learning/agent/ws    Agent side (consumes pairing code)
-
-REST:
-  GET /api/learning/questions   Question bank docs
 """
 
 import json
 import logging
 import asyncio
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query
 from src.services.relay_service import relay
 from src.routes.learning_context import search_vector_context, ContextRequest
+from src.services.auth import get_ws_token, verify_supabase_token
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +23,19 @@ router = APIRouter(prefix="/api/learning", tags=["learning"])
 # ======================================================================
 
 @router.websocket("/ws")
-async def browser_websocket(ws: WebSocket):
+async def browser_websocket(ws: WebSocket, token: str = Query(default="")):
     """Browser connects, gets a pairing code for the local agent to use"""
+    ws_token = get_ws_token(ws, token)
+    try:
+        verify_supabase_token(ws_token)
+    except HTTPException:
+        await ws.accept()
+        await ws.send_json({"type": "error", "text": "请先登录后再连接 AI 学习中心。"})
+        await ws.close(code=1008)
+        return
+
     await ws.accept()
-    code, message_queue = await relay.register_browser(ws)
+    code, message_queue = await relay.register_browser(ws, ws_token)
 
     # Send pairing code immediately
     await ws.send_json({"type": "pairing_code", "code": code})
@@ -156,15 +163,3 @@ async def get_context(req: ContextRequest):
     except Exception as e:
         logger.error(f"Context search error: {e}")
         return {"context": "", "status": "error", "message": str(e)}
-
-@router.get("/questions")
-async def get_questions(
-    subject_id: str = Query(default=""),
-    limit: int = Query(default=10, ge=1, le=50),
-    difficulty: int = Query(default=0, ge=0, le=5),
-):
-    return {
-        "questions": [],
-        "note": "Frontend queries knowledge_points via supabase-js directly",
-        "query_params": {"subject_id": subject_id, "limit": limit, "difficulty": difficulty},
-    }

@@ -2,8 +2,9 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/supabase";
+import { WorkspacePageShell } from "@/components/WorkspacePageShell";
 import { ExamInfo, Subject, WebdavConfig } from "@/types";
-import { formatDate, cn, toBase64 } from "@/lib/utils";
+import { formatDate } from "@/lib/utils";
 import {
   Plus, Trash2, GraduationCap, BookOpen, HardDrive, Cpu,
 } from "lucide-react";
@@ -13,14 +14,17 @@ const SUBJECT_COLORS = ["#6366f1", "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "
 export default function Settings() {
   const [activeTab, setActiveTab] = useState<"exam" | "subject" | "webdav" | "ai">("exam");
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
-      <h1 className="text-2xl font-bold">设置</h1>
+    <WorkspacePageShell
+      title="设置"
+      description="管理考试、科目以及系统连接配置。"
+      contentClassName="max-w-3xl mx-auto space-y-6"
+    >
       <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-1 w-fit flex-wrap">
         {[
-          { key: "exam", icon: GraduationCap, label: "考试信息" },
+          { key: "exam", icon: GraduationCap, label: "学习配置" },
           { key: "subject", icon: BookOpen, label: "科目管理" },
-          { key: "webdav", icon: HardDrive, label: "WebDAV" },
-          { key: "ai", icon: Cpu, label: "AI供应商" },
+          { key: "webdav", icon: HardDrive, label: "系统配置" },
+          { key: "ai", icon: Cpu, label: "AI 供应商" },
         ].map(({ key, icon: Icon, label }) => (
           <button key={key} onClick={() => setActiveTab(key as typeof activeTab)}
             className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === key ? "bg-white dark:bg-gray-700 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
@@ -29,7 +33,7 @@ export default function Settings() {
         ))}
       </div>
       {activeTab === "exam" ? <ExamManager /> : activeTab === "subject" ? <SubjectManager /> : activeTab === "webdav" ? <WebdavManager /> : <AiConfigPanel />}
-    </div>
+    </WorkspacePageShell>
   );
 }
 
