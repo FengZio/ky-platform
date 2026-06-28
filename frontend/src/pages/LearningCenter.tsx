@@ -45,6 +45,7 @@ import {
   FileDown,
   CheckCircle2,
   Database,
+  Bug,
 } from "lucide-react";
 
 interface TaskCacheItem {
@@ -187,6 +188,23 @@ function ReasoningBlock({ text, isStreaming }: { text: string; isStreaming: bool
   );
 }
 
+function AssistantResponseState({ state }: { state?: ChatMessage["responseState"] }) {
+  if (!state) return null;
+
+  const config = {
+    thinking: { label: "思考中", className: "bg-primary/8 text-primary" },
+    replying: { label: "回复中", className: "bg-success/10 text-success-700" },
+    completed: { label: "已完成", className: "bg-surface-low text-foreground-muted" },
+  }[state];
+
+  return (
+    <span className={cn("mb-2 inline-flex h-6 items-center gap-1 rounded-full px-2 text-[11px]", config.className)}>
+      {state === "completed" ? <CheckCircle2 className="h-3 w-3" /> : <Loader2 className="h-3 w-3 animate-spin" />}
+      {config.label}
+    </span>
+  );
+}
+
 export default function LearningCenter() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -195,6 +213,7 @@ export default function LearningCenter() {
     input,
     agentConnected,
     turnActive,
+    debugMode,
     pairingCode,
     conversationId,
     selectedKps,
@@ -202,6 +221,7 @@ export default function LearningCenter() {
     setInput,
     setConversationId,
     setMessages,
+    setDebugMode,
     toggleKp,
     toggleMaterial,
     removeContext,
@@ -683,6 +703,19 @@ export default function LearningCenter() {
                   <Plus className="h-3 w-3" />
                   新对话
                 </PrimaryButton>
+                <button
+                  type="button"
+                  onClick={() => setDebugMode(!debugMode)}
+                  className={cn(
+                    "inline-flex h-9 items-center gap-1.5 rounded-full border px-3 text-xs transition-colors",
+                    debugMode
+                      ? "border-warning/30 bg-warning/10 text-warning-700"
+                      : "border-outline-variant bg-white text-foreground-muted hover:bg-surface-low",
+                  )}
+                >
+                  <Bug className="h-3.5 w-3.5" />
+                  调试模式
+                </button>
               </div>
             </div>
           </div>
@@ -758,8 +791,10 @@ export default function LearningCenter() {
                           : "max-w-[90%] bg-info/10 text-primary text-xs",
                     )}
                   >
+                    {msg.role === "assistant" ? <AssistantResponseState state={msg.responseState} /> : null}
+
                     {msg.role === "assistant" && msg.reasoning ? (
-                      <ReasoningBlock text={msg.reasoning} isStreaming={!!msg.isStreaming && !msg.content} />
+                      <ReasoningBlock text={msg.reasoning} isStreaming={msg.responseState === "thinking"} />
                     ) : null}
 
                     {msg.role === "assistant" ? (

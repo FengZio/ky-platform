@@ -11,7 +11,6 @@ Tools:
 """
 
 import asyncio
-import json
 import os
 import sys
 import logging
@@ -33,7 +32,7 @@ from mcp.server.lowlevel.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types as mcp_types
 
-from src.services.supabase import get_admin
+from src.services.supabase import get_ai_config_for_client, get_user_client
 from src.services.embedding import get_embedding
 
 SERVER_INFO = {
@@ -42,6 +41,8 @@ SERVER_INFO = {
 }
 
 server = Server("ky-platform-search")
+
+_user_client = None
 
 _SUBJECT_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("数学", ("数学", "高数", "线代", "概率", "极限", "导数", "微分", "积分", "矩阵", "行列式")),
@@ -60,11 +61,65 @@ _SUBJECT_NAME_ALIASES: dict[str, tuple[str, ...]] = {
 
 def _load_subjects() -> list[dict[str, str]]:
     try:
-        resp = get_admin().table("subjects").select("id,name").execute()
+        resp = _get_user_client().table("subjects").select("id,name").execute()
         return resp.data or []
     except Exception as e:
         logger.warning("load subjects failed: %s", e)
         return []
+
+
+def _get_user_client():
+    global _user_client
+    if _user_client is None:
+        token = os.getenv("SUPABASE_ACCESS_TOKEN", "").strip()
+        _user_client = get_user_client(token)
+    return _user_client
+
+
+def _is_missing_rpc_signature_error(err: Exception) -> bool:
+    text = str(err).lower()
+    return "does not exist" in text or "could not find the function" in text
+
+
+def _rpc_with_subject_fallback(client, rpc_name: str, payload: dict):
+    try:
+        return client.rpc(rpc_name, payload).execute()
+    except Exception as e:
+        if not payload.get("p_subject_id") or not _is_missing_rpc_signature_error(e):
+            raise
+        fallback_payload = dict(payload)
+        fallback_payload.pop("p_subject_id", None)
+        logger.warning("%s fallback to legacy signature without subject_id", rpc_name)
+        return client.rpc(rpc_name, fallback_payload).execute()
+
+
+async def _get_query_embedding(query: str) -> list[float]:
+    cfg = await get_ai_config_for_client(_get_user_client())
+
+    old_api_key = os.environ.get("OPENAI_API_KEY")
+    old_base_url = os.environ.get("OPENAI_BASE_URL")
+    old_model = os.environ.get("EMBEDDING_MODEL")
+
+    try:
+        os.environ["OPENAI_API_KEY"] = cfg.get("api_key", "") or ""
+        os.environ["OPENAI_BASE_URL"] = cfg.get("base_url", "") or ""
+        os.environ["EMBEDDING_MODEL"] = cfg.get("embed_model", "") or ""
+        return await get_embedding(query)
+    finally:
+        if old_api_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = old_api_key
+
+        if old_base_url is None:
+            os.environ.pop("OPENAI_BASE_URL", None)
+        else:
+            os.environ["OPENAI_BASE_URL"] = old_base_url
+
+        if old_model is None:
+            os.environ.pop("EMBEDDING_MODEL", None)
+        else:
+            os.environ["EMBEDDING_MODEL"] = old_model
 
 
 def _subject_matches_label(subject_name: str, label: str) -> bool:
@@ -188,13 +243,14 @@ async def _tool_search_knowledge(args: dict) -> list[mcp_types.TextContent]:
         subject_id = _infer_subject_id(query)
 
     try:
-        query_emb = await get_embedding(query)
+        query_emb = await _get_query_embedding(query)
     except Exception as e:
         return [mcp_types.TextContent(type="text", text=f"Embedding 失败: {e}")]
 
-    client = get_admin()
+    client = _get_user_client()
     try:
-        resp = client.rpc(
+        resp = _rpc_with_subject_fallback(
+            client,
             "search_kps_by_vector",
             {
                 "p_query_embedding": query_emb,
@@ -203,7 +259,7 @@ async def _tool_search_knowledge(args: dict) -> list[mcp_types.TextContent]:
                 "p_min_score": min_score,
                 "p_subject_id": subject_id,
             },
-        ).execute()
+        )
         rows = resp.data or []
     except Exception as e:
         return [mcp_types.TextContent(type="text", text=f"搜索失败: {e}")]
@@ -236,14 +292,15 @@ async def _tool_search_materials(args: dict) -> list[mcp_types.TextContent]:
         subject_id = _infer_subject_id(query)
 
     try:
-        query_emb = await get_embedding(query)
+        query_emb = await _get_query_embedding(query)
     except Exception as e:
         return [mcp_types.TextContent(type="text", text=f"Embedding 失败: {e}")]
 
-    client = get_admin()
+    client = _get_user_client()
     try:
         if tags:
-            resp = client.rpc(
+            resp = _rpc_with_subject_fallback(
+                client,
                 "search_chunks_hybrid",
                 {
                     "p_query_embedding": query_emb,
@@ -253,9 +310,10 @@ async def _tool_search_materials(args: dict) -> list[mcp_types.TextContent]:
                     "p_min_score": min_score,
                     "p_subject_id": subject_id,
                 },
-            ).execute()
+            )
         else:
-            resp = client.rpc(
+            resp = _rpc_with_subject_fallback(
+                client,
                 "search_chunks_by_vector",
                 {
                     "p_query_embedding": query_emb,
@@ -264,7 +322,7 @@ async def _tool_search_materials(args: dict) -> list[mcp_types.TextContent]:
                     "p_min_score": min_score,
                     "p_subject_id": subject_id,
                 },
-            ).execute()
+            )
         rows = resp.data or []
     except Exception as e:
         return [mcp_types.TextContent(type="text", text=f"搜索失败: {e}")]
@@ -295,7 +353,7 @@ async def _tool_get_chunk_detail(args: dict) -> list[mcp_types.TextContent]:
     if not chunk_id:
         return [mcp_types.TextContent(type="text", text="错误：chunk_id 不能为空")]
 
-    client = get_admin()
+    client = _get_user_client()
     try:
         resp = (
             client.table("material_chunks")

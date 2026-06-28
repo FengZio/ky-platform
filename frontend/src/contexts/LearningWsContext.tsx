@@ -8,6 +8,7 @@ export type ChatMessage = {
   content: string;
   isStreaming?: boolean;
   reasoning?: string;
+  responseState?: "thinking" | "replying" | "completed";
 };
 
 export type ContextItem = { id: string; name: string; type: "kp" | "material" };
@@ -23,6 +24,7 @@ interface LearningWsState {
   input: string;
   agentConnected: boolean;
   turnActive: boolean;
+  debugMode: boolean;
   pairingCode: string;
   conversationId: string;
   selectedKps: ContextItem[];
@@ -30,6 +32,7 @@ interface LearningWsState {
   setInput: (v: string) => void;
   setConversationId: (v: string) => void;
   setMessages: (v: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => void;
+  setDebugMode: (v: boolean) => void;
   toggleKp: (kp: { id: string; name: string }) => void;
   toggleMaterial: (m: { id: string; title: string }) => void;
   removeContext: (item: ContextItem) => void;
@@ -47,6 +50,7 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
   const [input, setInput] = useState("");
   const [agentConnected, setAgentConnected] = useState(false);
   const [turnActive, setTurnActive] = useState(false);
+  const [debugMode, setDebugMode] = useState(false);
   const [pairingCode, setPairingCode] = useState("");
   const [conversationId, setConversationId] = useState("");
   const [selectedKps, setSelectedKps] = useState<ContextItem[]>([]);
@@ -56,6 +60,11 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectAttempt = useRef(0);
+  const debugModeRef = useRef(debugMode);
+
+  useEffect(() => {
+    debugModeRef.current = debugMode;
+  }, [debugMode]);
 
   // ---- Client heartbeat: ping every 30s ----
   const startHeartbeat = useCallback((ws: WebSocket) => {
@@ -117,6 +126,15 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
               content: msg.text || "本地 Codex Agent 已断开。请复制配对码，在电脑上运行 local_agent.py 并输入该配对码重新连接。",
             }]);
             break;
+          case "turn_started":
+            setTurnActive(true);
+            setMessages((prev) => [...prev, {
+              role: "assistant",
+              content: "",
+              isStreaming: true,
+              responseState: "thinking",
+            }]);
+            break;
           case "reasoning_chunk":
             setMessages((prev) => {
               const last = prev[prev.length - 1];
@@ -124,6 +142,7 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
                 const updated = [...prev];
                 updated[updated.length - 1] = {
                   ...last,
+                  responseState: "thinking",
                   reasoning: (last.reasoning || "") + msg.text,
                 };
                 return updated;
@@ -132,6 +151,7 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
                 role: "assistant",
                 content: "",
                 isStreaming: true,
+                responseState: "thinking",
                 reasoning: msg.text,
               }];
             });
@@ -159,22 +179,44 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
           case "assistant_chunk":
             setTurnActive(true);
             setMessages((prev) => {
-              const last = prev[prev.length - 1];
-              if (last?.role === "assistant" && last.isStreaming) {
+              const streamingIndex = [...prev].reverse().findIndex((item) => item.role === "assistant" && item.isStreaming);
+              if (streamingIndex >= 0) {
+                const targetIndex = prev.length - 1 - streamingIndex;
+                const target = prev[targetIndex];
                 const updated = [...prev];
-                updated[updated.length - 1] = { ...last, content: last.content + msg.text };
+                updated[targetIndex] = {
+                  ...target,
+                  content: target.content + msg.text,
+                  responseState: "replying",
+                };
                 return updated;
               }
-              return [...prev, { role: "assistant", content: msg.text, isStreaming: true }];
+              return [...prev, { role: "assistant", content: msg.text, isStreaming: true, responseState: "replying" }];
             });
+            break;
+          case "codex_debug":
+            if (debugModeRef.current) {
+              setMessages((prev) => [...prev, {
+                role: "system",
+                content: [
+                  msg.label || "Codex 调试事件",
+                  `method: ${msg.method || "unknown"}`,
+                  msg.item_type ? `item_type: ${msg.item_type}` : "",
+                  msg.tool ? `tool: ${msg.server || "MCP"}/${msg.tool}` : "",
+                  msg.summary ? `summary: ${msg.summary}` : "",
+                ].filter(Boolean).join("\n"),
+              }]);
+            }
             break;
           case "turn_completed":
             setTurnActive(false);
             setMessages((prev) => {
               const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last?.isStreaming) {
-                updated[updated.length - 1] = { ...last, isStreaming: false };
+              const streamingIndex = [...updated].reverse().findIndex((item) => item.role === "assistant" && item.isStreaming);
+              if (streamingIndex >= 0) {
+                const targetIndex = updated.length - 1 - streamingIndex;
+                const target = updated[targetIndex];
+                updated[targetIndex] = { ...target, isStreaming: false, responseState: "completed" };
               }
               return updated;
             });
@@ -283,8 +325,10 @@ export function LearningWsProvider({ children }: { children: ReactNode }) {
   return (
     <LearningWsContext.Provider value={{
       messages, input, agentConnected, turnActive, pairingCode,
+      debugMode,
       conversationId, selectedKps, selectedMaterials,
       setInput, setConversationId, setMessages,
+      setDebugMode,
       toggleKp, toggleMaterial, removeContext,
       handleSend, handleQuickAsk, newConversation,
     }}>

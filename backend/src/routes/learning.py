@@ -25,8 +25,9 @@ router = APIRouter(prefix="/api/learning", tags=["learning"])
 @router.websocket("/ws")
 async def browser_websocket(ws: WebSocket, token: str = Query(default="")):
     """Browser connects, gets a pairing code for the local agent to use"""
+    ws_token = get_ws_token(ws, token)
     try:
-        verify_supabase_token(get_ws_token(ws, token))
+        verify_supabase_token(ws_token)
     except HTTPException:
         await ws.accept()
         await ws.send_json({"type": "error", "text": "请先登录后再连接 AI 学习中心。"})
@@ -34,7 +35,7 @@ async def browser_websocket(ws: WebSocket, token: str = Query(default="")):
         return
 
     await ws.accept()
-    code, message_queue = await relay.register_browser(ws)
+    code, message_queue = await relay.register_browser(ws, ws_token)
 
     # Send pairing code immediately
     await ws.send_json({"type": "pairing_code", "code": code})

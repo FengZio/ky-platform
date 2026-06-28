@@ -1,4 +1,5 @@
 import httpx
+import os
 
 from src.config import settings
 
@@ -18,9 +19,9 @@ def _get_client() -> httpx.AsyncClient:
 
 
 async def get_embedding(text: str, user_id: str = "") -> list[float]:
-    api_key = settings.openai_api_key
-    base_url = settings.openai_base_url.rstrip("/")
-    model = settings.embedding_model
+    api_key = os.getenv("OPENAI_API_KEY", settings.openai_api_key)
+    base_url = os.getenv("OPENAI_BASE_URL", settings.openai_base_url).rstrip("/")
+    model = os.getenv("EMBEDDING_MODEL", settings.embedding_model)
 
     if not api_key:
         if user_id:

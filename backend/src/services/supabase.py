@@ -17,6 +17,52 @@ def get_admin() -> Client:
     return _client
 
 
+def get_user_client(access_token: str) -> Client:
+    """按用户 access token 构造 Supabase client。"""
+    token = (access_token or "").strip()
+    if not token:
+        raise ValueError("缺少 SUPABASE_ACCESS_TOKEN")
+    if not settings.supabase_url:
+        raise ValueError("缺少 SUPABASE_URL")
+    if not settings.supabase_anon_key:
+        raise ValueError("缺少 SUPABASE_ANON_KEY")
+
+    client = create_client(settings.supabase_url, settings.supabase_anon_key)
+    try:
+        client.postgrest.auth(token)
+    except Exception:
+        pass
+    try:
+        client.auth.set_session(access_token=token, refresh_token=token)
+    except Exception:
+        pass
+    return client
+
+
+async def get_ai_config_for_client(client: Client) -> dict:
+    """基于用户态 client 读取 AI 配置，失败时回退到全局默认。"""
+    data: dict = {}
+    try:
+        res = (
+            client.table("ai_configs")
+            .select("*")
+            .eq("is_active", True)
+            .limit(1)
+            .maybe_single()
+            .execute()
+        )
+        if isinstance(res.data, dict):
+            data = res.data
+    except Exception:
+        data = {}
+
+    return {
+        "api_key": data.get("embed_api_key") or data.get("api_key") or settings.openai_api_key,
+        "base_url": data.get("embed_base_url") or data.get("base_url") or settings.openai_base_url,
+        "embed_model": data.get("embed_model") or data.get("embedding_model") or settings.embedding_model,
+    }
+
+
 async def get_webdav_config(user_id: str) -> dict:
     """获取用户的 WebDAV 配置"""
     res = (

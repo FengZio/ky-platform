@@ -66,6 +66,23 @@ def _infer_subject_id(message: str) -> str | None:
     return None
 
 
+def _is_missing_rpc_signature_error(err: Exception) -> bool:
+    text = str(err).lower()
+    return "does not exist" in text or "could not find the function" in text
+
+
+def _rpc_with_subject_fallback(client, rpc_name: str, payload: dict):
+    try:
+        return client.rpc(rpc_name, payload).execute()
+    except Exception as e:
+        if not payload.get("p_subject_id") or not _is_missing_rpc_signature_error(e):
+            raise
+        fallback_payload = dict(payload)
+        fallback_payload.pop("p_subject_id", None)
+        print(f"[CTX] {rpc_name} fallback to legacy signature")
+        return client.rpc(rpc_name, fallback_payload).execute()
+
+
 async def search_vector_context(req: ContextRequest) -> str:
     """Search material_chunks and knowledge_points via pgvector RPC."""
     print("[CTX] search: msg_len=%d mat_ids=%d kp_ids=%d top_k=%d",
@@ -88,7 +105,8 @@ async def search_vector_context(req: ContextRequest) -> str:
         print("[CTX] subject route: %s", subject_id)
 
     try:
-        chunk_resp = client.rpc(
+        chunk_resp = _rpc_with_subject_fallback(
+            client,
             "search_chunks_by_vector",
             {
                 "p_query_embedding": query_emb,
@@ -97,7 +115,7 @@ async def search_vector_context(req: ContextRequest) -> str:
                 "p_min_score": req.min_score,
                 "p_subject_id": subject_id,
             },
-        ).execute()
+        )
         chunk_rows = chunk_resp.data or []
         print("[CTX] chunk RPC results: %d rows", len(chunk_rows))
         for row in chunk_rows:
@@ -112,7 +130,8 @@ async def search_vector_context(req: ContextRequest) -> str:
         print("[CTX] chunk RPC error: %s", e)
 
     try:
-        kp_resp = client.rpc(
+        kp_resp = _rpc_with_subject_fallback(
+            client,
             "search_kps_by_vector",
             {
                 "p_query_embedding": query_emb,
@@ -121,7 +140,7 @@ async def search_vector_context(req: ContextRequest) -> str:
                 "p_min_score": req.min_score,
                 "p_subject_id": subject_id,
             },
-        ).execute()
+        )
         kp_rows = kp_resp.data or []
         print("[CTX] kp RPC results: %d rows", len(kp_rows))
         for row in kp_rows:

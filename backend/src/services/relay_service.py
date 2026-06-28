@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime, timezone
 
+from src.config import settings
+
 logger = logging.getLogger(__name__)
 
 AGENT_IDLE_TIMEOUT = 600
@@ -31,6 +33,7 @@ PAIRING_CODE_TTL = 300
 class BrowserSession:
     ws: any
     pairing_code: str
+    access_token: str
     message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     last_active: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -113,9 +116,9 @@ class RelayManager:
                     await self._close_agent(code, "idle timeout")
             self._pairing.cleanup_expired()
 
-    async def register_browser(self, ws) -> tuple[str, asyncio.Queue]:
+    async def register_browser(self, ws, access_token: str) -> tuple[str, asyncio.Queue]:
         code = self._pairing.generate()
-        session = BrowserSession(ws=ws, pairing_code=code)
+        session = BrowserSession(ws=ws, pairing_code=code, access_token=access_token)
         self._browsers[code] = session
         logger.info(f"Browser connected, pairing code: {code}")
         return code, session.message_queue
@@ -138,6 +141,15 @@ class RelayManager:
         self._pairing.remove(code)
         logger.info(f"Agent paired: {code}")
 
+        await session.message_queue.put({
+            "type": "session_config",
+            "supabase_url": settings.supabase_url,
+            "supabase_anon_key": settings.supabase_anon_key,
+            "supabase_access_token": browser.access_token,
+            "openai_api_key": settings.openai_api_key,
+            "openai_base_url": settings.openai_base_url,
+            "embedding_model": settings.embedding_model,
+        })
         await browser.message_queue.put({"type": "agent_connected"})
         return session.message_queue
 
